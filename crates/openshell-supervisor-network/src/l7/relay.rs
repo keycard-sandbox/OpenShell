@@ -708,7 +708,7 @@ where
                 ) {
                     observer.observe_token_grant_refusal(refusal, request_id);
                 }
-                write_bad_gateway_response(client, Some(request_id)).await?;
+                write_token_grant_refusal(client, refusal, request_id).await?;
             } else {
                 warn!(error = %error, "Token grant failed before forwarding");
                 write_bad_gateway_response(client, None).await?;
@@ -3675,11 +3675,14 @@ where
                     .await
             }
         };
-        let Ok(req_with_auth) = injected else {
-            // The refusal event names the credential and request ID.
-            // The sandbox-level grant record does not require an MCP endpoint identity.
-            write_bad_gateway_response(client, Some(&request_id)).await?;
-            return Ok(());
+        let req_with_auth = match injected {
+            Ok(req) => req,
+            Err(refusal) => {
+                // The refusal event names the credential and request ID.
+                // The sandbox-level grant record does not require an MCP endpoint identity.
+                write_token_grant_refusal(client, &refusal, &request_id).await?;
+                return Ok(());
+            }
         };
         let ctx = &grant_ctx;
         let scoped_ctx = scoped_context_for_request(ctx, &req_with_auth);
@@ -3737,6 +3740,32 @@ where
     Ok(())
 }
 
+/// Answer a refused token grant: `403` when the delegated grant's authorization
+/// server denied the request, the generic `502` otherwise. Both include the
+/// request ID and never the cause.
+async fn write_token_grant_refusal<W>(
+    client: &mut W,
+    refusal: &crate::l7::token_grant_injection::TokenGrantInjectionError,
+    request_id: &str,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    if !refusal.is_denial() {
+        return write_bad_gateway_response(client, Some(request_id)).await;
+    }
+    let response = format!(
+        "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n{}: {request_id}\r\nConnection: close\r\n\r\n",
+        openshell_core::token_grant_failure::REQUEST_ID_HEADER
+    );
+    client
+        .write_all(response.as_bytes())
+        .await
+        .into_diagnostic()?;
+    client.flush().await.into_diagnostic()?;
+    Ok(())
+}
+
 /// Write the generic empty `502`. A refused token grant passes its request ID,
 /// so the caller can quote it to an operator; the response never carries the cause.
 async fn write_bad_gateway_response<W>(client: &mut W, request_id: Option<&str>) -> Result<()>
@@ -3779,6 +3808,46 @@ mod tests {
             TokenGrantFailureKind::ProviderAuthorizationRequired,
             TokenGrantStage::GatewayRpc,
         )
+    }
+
+    #[tokio::test]
+    async fn only_a_delegated_denial_is_answered_with_403() {
+        use crate::l7::token_grant_injection::TokenGrantInjectionError;
+        const REQUEST_ID: &str = "3c2b1a09-8f7e-4d6c-9b5a-4f3e2d1c0b9a";
+        let failure = |kind| TokenGrantFailure::new(kind, TokenGrantStage::TokenEndpoint);
+        let cases = [
+            (TokenGrantFailureKind::AccessDenied, true, "403 Forbidden"),
+            (
+                TokenGrantFailureKind::ProviderAuthorizationRequired,
+                true,
+                "403 Forbidden",
+            ),
+            (
+                TokenGrantFailureKind::ProviderAuthorizationRequired,
+                false,
+                "502 Bad Gateway",
+            ),
+            (
+                TokenGrantFailureKind::AccessDenied,
+                false,
+                "502 Bad Gateway",
+            ),
+            (TokenGrantFailureKind::Unavailable, true, "502 Bad Gateway"),
+        ];
+        for (kind, delegated, status) in cases {
+            let refusal = TokenGrantInjectionError::for_test(failure(kind), delegated);
+            let mut written = Vec::new();
+            write_token_grant_refusal(&mut written, &refusal, REQUEST_ID)
+                .await
+                .unwrap();
+            assert_eq!(
+                String::from_utf8(written).unwrap(),
+                format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: 0\r\nx-openshell-request-id: {REQUEST_ID}\r\nConnection: close\r\n\r\n"
+                ),
+                "{kind:?} delegated={delegated}"
+            );
+        }
     }
 
     /// Assert the generic refusal and return its request ID header value.

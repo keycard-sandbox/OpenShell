@@ -6440,7 +6440,7 @@ async fn handle_forward_proxy(
                     if let Some(observer) = endpoint_observer.as_ref() {
                         observer.observe_token_grant_refusal(refusal, &request_id);
                     }
-                    build_token_grant_failure_response(&request_id)
+                    build_token_grant_failure_response(refusal, &request_id)
                 },
             );
             respond(client, &response).await?;
@@ -6915,15 +6915,28 @@ fn build_json_error_response(status: u16, status_text: &str, error: &str, detail
 
 /// Build the forward proxy's refusal for a failed dynamic token grant.
 ///
-/// This is the generic grant refusal plus a request ID header, which lets the
-/// caller quote the exchange to an operator without learning its cause.
-fn build_token_grant_failure_response(request_id: &str) -> Vec<u8> {
-    let generic = build_json_error_response(
-        502,
-        "Bad Gateway",
-        "token_grant_failed",
-        "dynamic token grant failed",
-    );
+/// A delegated grant denial is a 403 and any other failure is the generic 502.
+/// Both add a request ID header, which lets the caller quote the exchange to an
+/// operator without learning its cause.
+fn build_token_grant_failure_response(
+    refusal: &crate::l7::token_grant_injection::TokenGrantInjectionError,
+    request_id: &str,
+) -> Vec<u8> {
+    let generic = if refusal.is_denial() {
+        build_json_error_response(
+            403,
+            "Forbidden",
+            "delegated_grant_denied",
+            "the delegated credential grant denied this request",
+        )
+    } else {
+        build_json_error_response(
+            502,
+            "Bad Gateway",
+            "token_grant_failed",
+            "dynamic token grant failed",
+        )
+    };
     String::from_utf8_lossy(&generic)
         .replacen(
             "\r\nConnection: close\r\n",
@@ -11088,11 +11101,63 @@ network_policies:
     const FORWARD_REQUEST_ID: &str = "9b8a7f6e-5d4c-4b3a-9f8e-7d6c5b4a3f2e";
 
     #[test]
-    fn forward_grant_refusal_adds_the_request_id_header() {
-        let response = build_token_grant_failure_response(FORWARD_REQUEST_ID);
+    fn forward_grant_refusal_status_follows_the_refusal_and_adds_the_request_id_header() {
+        use crate::l7::token_grant_injection::TokenGrantInjectionError;
+        use openshell_core::token_grant_failure::{
+            TokenGrantFailure, TokenGrantFailureKind, TokenGrantStage,
+        };
+        let failure = |kind| TokenGrantFailure::new(kind, TokenGrantStage::TokenEndpoint);
+        let cases = [
+            (
+                TokenGrantInjectionError::for_test(
+                    failure(TokenGrantFailureKind::Unavailable),
+                    false,
+                ),
+                "HTTP/1.1 502 Bad Gateway\r\n",
+                r#"{"error":"token_grant_failed","detail":"dynamic token grant failed"}"#,
+            ),
+            (
+                TokenGrantInjectionError::for_test(
+                    failure(TokenGrantFailureKind::AccessDenied),
+                    false,
+                ),
+                "HTTP/1.1 502 Bad Gateway\r\n",
+                r#"{"error":"token_grant_failed","detail":"dynamic token grant failed"}"#,
+            ),
+            (
+                TokenGrantInjectionError::for_test(
+                    failure(TokenGrantFailureKind::Unavailable),
+                    true,
+                ),
+                "HTTP/1.1 502 Bad Gateway\r\n",
+                r#"{"error":"token_grant_failed","detail":"dynamic token grant failed"}"#,
+            ),
+            (
+                TokenGrantInjectionError::for_test(
+                    failure(TokenGrantFailureKind::AccessDenied),
+                    true,
+                ),
+                "HTTP/1.1 403 Forbidden\r\n",
+                r#"{"error":"delegated_grant_denied","detail":"the delegated credential grant denied this request"}"#,
+            ),
+            (
+                TokenGrantInjectionError::for_test(
+                    failure(TokenGrantFailureKind::ProviderAuthorizationRequired),
+                    true,
+                ),
+                "HTTP/1.1 403 Forbidden\r\n",
+                r#"{"error":"delegated_grant_denied","detail":"the delegated credential grant denied this request"}"#,
+            ),
+        ];
         let header =
             format!("\r\nx-openshell-request-id: {FORWARD_REQUEST_ID}\r\nConnection: close\r\n");
-        assert!(String::from_utf8_lossy(&response).contains(&header));
+        for (refusal, status_line, body) in cases {
+            let response = build_token_grant_failure_response(&refusal, FORWARD_REQUEST_ID);
+            let response = String::from_utf8_lossy(&response);
+            assert!(response.starts_with(status_line), "{response}");
+            assert!(response.contains(&header), "{response}");
+            assert!(response.ends_with(body), "{response}");
+        }
     }
 
     type ForwardGrantResponse<'a> =

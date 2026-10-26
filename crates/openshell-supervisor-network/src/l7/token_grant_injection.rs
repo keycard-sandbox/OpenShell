@@ -128,6 +128,15 @@ impl TokenGrantInjectionError {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test(failure: TokenGrantFailure, delegated: bool) -> Self {
+        Self {
+            failure,
+            credential: None,
+            delegated,
+        }
+    }
+
     /// Whether the delegated grant refused the request on policy: the
     /// authorization server denied it, the user has not authorized the
     /// resource, or the request cannot present what the grant requires.
