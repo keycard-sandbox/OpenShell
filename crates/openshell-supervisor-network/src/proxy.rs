@@ -1245,6 +1245,13 @@ async fn handle_transparent_tcp_connection(
     // The transparent path has no PolicyLocalContext; the instance's grant
     // slot is passed in directly.
     ctx.delegated_grant = Some(delegated_grant);
+    if crate::delegated_grant::refuses_raw_relay(
+        ctx.delegated_grant.as_deref(),
+        &ctx.host,
+        "transparent tcp",
+    ) {
+        return Ok(());
+    }
     let middleware_gate = middleware_uninspectable_gate(&opa_engine, &ctx)?;
     if middleware_gate == crate::l7::middleware::UninspectableTrafficGate::Deny {
         crate::l7::middleware::emit_middleware_uninspectable(&ctx, "transparent tcp", true);
@@ -3040,6 +3047,14 @@ async fn handle_mediated_connection(
     );
 
     if effective_tls_skip {
+        if crate::delegated_grant::refuses_raw_relay(
+            ctx.delegated_grant.as_deref(),
+            &ctx.host,
+            "tls-skip tunnel",
+        ) {
+            respond(&mut client, &delegated_grant_raw_relay_refusal()).await?;
+            return Ok(());
+        }
         // Policy validation rejects fail-closed middleware overlapping
         // `tls: skip` endpoints; this runtime gate is defense in depth.
         match middleware_uninspectable_gate(&opa_engine, &ctx)? {
@@ -3229,6 +3244,14 @@ async fn handle_mediated_connection(
             }
         }
     } else {
+        if crate::delegated_grant::refuses_raw_relay(
+            ctx.delegated_grant.as_deref(),
+            &ctx.host,
+            "non-http tcp",
+        ) {
+            respond(&mut client, &delegated_grant_raw_relay_refusal()).await?;
+            return Ok(());
+        }
         let middleware_gate = middleware_uninspectable_gate(&opa_engine, &ctx)?;
         let requirement = inspection_requirement(should_inspect_l7, middleware_gate);
         if let Some(protocol_detail) =
@@ -6911,6 +6934,17 @@ fn build_json_error_response(status: u16, status_text: &str, error: &str, detail
         body_str,
     )
     .into_bytes()
+}
+
+/// Refusal for a tunnel to a host the delegated grant governs that the
+/// supervisor cannot parse as HTTP.
+fn delegated_grant_raw_relay_refusal() -> Vec<u8> {
+    build_json_error_response(
+        403,
+        "Forbidden",
+        "delegated_grant_required",
+        "traffic to this host must be HTTP that OpenShell can inspect",
+    )
 }
 
 /// Build the forward proxy's refusal for a failed dynamic token grant.

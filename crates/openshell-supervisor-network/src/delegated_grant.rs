@@ -12,6 +12,7 @@
 //! The supervisor authenticates with the sandbox instance's SPIFFE JWT-SVID in
 //! `client_assertion`. With token exchange, the user-delegated access token
 //! the workload sends in `Authorization` is the `subject_token`.
+
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -29,7 +30,8 @@ use openshell_core::token_grant_failure::{
     TokenGrantFailure, TokenGrantFailureKind, TokenGrantStage,
 };
 use openshell_ocsf::{
-    ConfigStateChangeBuilder, SeverityId, StateId, StatusId, ctx::ctx as ocsf_ctx, ocsf_emit,
+    ConfigStateChangeBuilder, DetectionFindingBuilder, FindingInfo, SeverityId, StateId, StatusId,
+    ctx::ctx as ocsf_ctx, ocsf_emit,
 };
 
 use crate::token_grant::{effective_jwt_svid_audience, validate_access_token};
@@ -391,6 +393,34 @@ impl DelegatedGrantSlot {
         };
         *installed = Some((config.clone(), Arc::new(state)));
     }
+}
+
+/// Whether raw relay to `host` must be refused.
+///
+/// Raw bytes cannot receive the grant's credential or its decision, so a
+/// governed host is never relayed uninspected. A refusal emits a High
+/// detection finding naming `detail`.
+#[must_use]
+pub fn refuses_raw_relay(slot: Option<&DelegatedGrantSlot>, host: &str, detail: &str) -> bool {
+    if !slot.is_some_and(|slot| slot.governs(host)) {
+        return false;
+    }
+    ocsf_emit!(
+        DetectionFindingBuilder::new(ocsf_ctx())
+            .severity(SeverityId::High)
+            .finding_info(FindingInfo::new(
+                "openshell.delegated_grant.traffic_uninspectable",
+                "Delegated credential grant cannot apply to this traffic",
+            ))
+            .evidence_pairs(&[
+                ("host", host),
+                ("protocol", detail),
+                ("disposition", "denied")
+            ])
+            .message("Uninspectable traffic to a host governed by the delegated grant; denied")
+            .build()
+    );
+    true
 }
 
 #[cfg(test)]
@@ -844,5 +874,31 @@ mod tests {
         // An equal grant built separately, as each configuration update delivers.
         slot.install(Some(&grant_config("https://as.example.com/token")));
         assert!(Arc::ptr_eq(&first, &slot.current().unwrap()));
+    }
+
+    #[test]
+    fn raw_relay_is_refused_only_for_governed_hosts() {
+        let active = DelegatedGrantSlot::default();
+        active.install(Some(&grant_config("https://as.example.com/token")));
+        let rejected = DelegatedGrantSlot::holding(DelegatedGrantState::Rejected);
+        let empty = DelegatedGrantSlot::default();
+        for (label, slot, host, expected) in [
+            ("selected host", Some(&active), "api.example.com", true),
+            ("unselected host", Some(&active), "other.example.com", false),
+            (
+                "rejected grant",
+                Some(rejected.as_ref()),
+                "other.example.com",
+                true,
+            ),
+            ("no grant installed", Some(&empty), "api.example.com", false),
+            ("no slot", None, "api.example.com", false),
+        ] {
+            assert_eq!(
+                refuses_raw_relay(slot, host, "tls-skip tunnel"),
+                expected,
+                "{label}"
+            );
+        }
     }
 }
