@@ -571,6 +571,51 @@ When `gateway_jwt` is configured, OpenShell attaches short-lived bearer credenti
 
 See [Supervisor Middleware Configuration](/extensibility/supervisor-middleware/configure) for attachment, failure, and operational guidance.
 
+## Delegated Credential Grant
+
+`[openshell.supervisor.delegated_grant]` names one OAuth 2.0 authorization server that issues the credential for every inspected HTTPS request to the selected hosts. The authorization server decides whether the sandbox may reach a host and which credential it gets. Adding a host the server issues tokens for does not require a gateway change, as long as the host matches `include_hosts` and network policy allows it.
+
+```toml
+[openshell.supervisor.delegated_grant]
+token_endpoint = "https://auth.example.com/oauth/token"
+assertion_source = "spiffe"
+grant_type = "token_exchange"
+include_hosts = ["api.github.com", "**.example.com"]
+exclude_hosts = ["status.example.com"]
+scopes = []
+```
+
+For each selected request, the supervisor requests a token with the request origin as the RFC 8707 `resource`, such as `https://api.github.com` or `https://api.example.com:8443`. The workload assertion goes in `client_assertion`. The supervisor replaces every `Authorization` header with `Bearer <token>`. The supervisor requests a new token for every request and does not cache tokens.
+
+| Field | Required | Behavior |
+|---|---|---|
+| `token_endpoint` | Yes | Token endpoint URL. Use `https://` unless the endpoint is loopback or a Kubernetes service. |
+| `assertion_source` | Yes | `spiffe` presents the sandbox's JWT-SVID. |
+| `assertion_audience` | No | `aud` of the JWT-SVID. Omission derives it from `token_endpoint`. |
+| `client_assertion_type` | No | OAuth 2.0 `client_assertion_type`. Defaults to `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`. |
+| `grant_type` | No | `client_credentials` (default): the workload acts as itself. `token_exchange`: RFC 8693 exchange of the user-delegated bearer token that the workload sends in `Authorization`, which becomes `subject_token`. |
+| `subject_token_type` | No | `subject_token_type` for `token_exchange`. Defaults to `urn:ietf:params:oauth:token-type:access_token`. |
+| `include_hosts` | Yes | Host patterns that use the grant, with network policy host syntax. |
+| `exclude_hosts` | No | Host patterns removed from `include_hosts`. |
+| `scopes` | No | Scopes sent with every grant request. |
+
+The supervisor answers with HTTP 403 when:
+
+- The token endpoint is `https://` and answers HTTP 400, 401, or 403 with `error` set to `access_denied`, `invalid_target`, `unauthorized_client`, `invalid_grant`, or `insufficient_authorization`.
+- A `token_exchange` request does not have exactly one `Authorization: Bearer` header.
+- The request is plaintext HTTP. The supervisor never sends a delegated token over plaintext.
+- The connection to a selected host is not HTTP that OpenShell parses, such as a `tls: skip` endpoint or other TCP traffic. The supervisor refuses the connection and emits a High detection finding.
+
+Any other grant failure returns HTTP 502 without forwarding the request. Both responses include the `x-openshell-request-id` header.
+
+The grant fails closed:
+
+- If the supervisor rejects the grant the gateway sends, it refuses every request and every uninspected connection until it installs a valid grant. A High `ConfigStateChange` event records the rejection.
+- Each request reads the installed grant, so a change applies to the next request on every open connection.
+- The delegated grant owns `Authorization` on selected hosts. A provider token grant for `Authorization` on the same request is not used. Provider grants for other headers still apply.
+
+Changing the section requires a gateway restart. Supervisors install the new grant on their next configuration update.
+
 ## Gateway Interceptors
 
 `[[openshell.gateway.interceptors]]` configures gateway-side interceptor services. The gateway calls each service's `Describe` RPC at startup, validates its declared OpenShell RPC bindings against the compiled service descriptor, and applies matching phases from a central gRPC middleware path. Interceptors can target only methods in the gateway's built-in allowlist of unary mutation RPCs. New RPCs are non-interceptable until they are deliberately added to that allowlist; adding one does not require handler-specific interceptor code. Request bodies are exposed as protobuf JSON objects. Fields marked secret in the protobuf schema are recursively omitted from requests and post-commit responses. Interceptors cannot patch an omitted field or a containing object.
@@ -1484,7 +1529,7 @@ changing it:
 openshell-gateway config preflight --path ~/.config/openshell/gateway.toml
 ```
 
-Without `--path`, the command validates a nonempty `OPENSHELL_GATEWAY_CONFIG`. Otherwise, it validates an existing XDG gateway config when one is discovered. When neither source selects a config, preflight validates the effective daemon arguments. An explicit missing path, a legacy schema-v1 file, invalid TOML, a symlink, or any nonregular file fails. Preflight merges the selected file with the current `OPENSHELL_*` environment and applies the daemon's read-only startup checks. These checks include selector and socket normalization, registered-driver selection and configuration, rate-limit pairs, TLS and mTLS relationships, interceptor registrations, and supervisor middleware registrations. When a selected file omits `compute_driver`, preflight validates each configured table for an auto-detectable driver without running the runtime detection probes, which can connect local sockets or launch discovery commands. It validates configured driver TLS requirements, including the gateway CA, without requiring package-generated certificate files to exist before certificate generation. It does not construct a compute driver or connect to a transport. A failed preflight always preserves the file; it never migrates, replaces, or rewrites configuration.
+Without `--path`, the command validates a nonempty `OPENSHELL_GATEWAY_CONFIG`. Otherwise, it validates an existing XDG gateway config when one is discovered. When neither source selects a config, preflight validates the effective daemon arguments. An explicit missing path, a legacy schema-v1 file, invalid TOML, a symlink, or any nonregular file fails. Preflight merges the selected file with the current `OPENSHELL_*` environment and applies the daemon's read-only startup checks. These checks include selector and socket normalization, registered-driver selection and configuration, rate-limit pairs, TLS and mTLS relationships, interceptor registrations, supervisor middleware registrations, and the delegated credential grant. When a selected file omits `compute_driver`, preflight validates each configured table for an auto-detectable driver without running the runtime detection probes, which can connect local sockets or launch discovery commands. It validates configured driver TLS requirements, including the gateway CA, without requiring package-generated certificate files to exist before certificate generation. It does not construct a compute driver or connect to a transport. A failed preflight always preserves the file; it never migrates, replaces, or rewrites configuration.
 
 Config preflight validates configuration without loading launch-signing keys, so a successful result does not confirm that the key files exist or form a usable pair. Gateway startup validates configured or discovered signing bundles. Sandbox creation checks the selected driver's launch-signing requirement before image preparation.
 
