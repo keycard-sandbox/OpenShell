@@ -427,6 +427,7 @@ message SandboxConfigSnapshot {
   string configuration_instance_id = 15;
   string configuration_error = 16;
   uint64 settings_revision = 17;
+  DelegatedCredentialGrant delegated_credential_grant = 18;
 }
 
 // Response containing effective sandbox settings and policy, projected from
@@ -477,6 +478,59 @@ message GetSandboxConfigResponse {
   string configuration_instance_id = 15;
   // Monotonic revision of the sandbox-scoped settings row.
   uint64 settings_revision = 17;
+  // Gateway-configured authorization server that issues the credential for
+  // requests to selected hosts. Absent when the gateway does not configure one.
+  DelegatedCredentialGrant delegated_credential_grant = 18;
+}
+
+// An authorization server that issues the credential for every inspected HTTP
+// request to a selected host. The supervisor requests a token with the request
+// origin as the RFC 8707 `resource` and replaces the `Authorization` header
+// with it. When the authorization server refuses, the supervisor denies the
+// request with HTTP 403. The supervisor refuses traffic to a selected host that
+// it cannot inspect, and refuses every request when it rejects the grant.
+message DelegatedCredentialGrant {
+  // OAuth 2.0 token endpoint of the authorization server.
+  string token_endpoint = 1;
+  // Workload identity the supervisor presents as the client assertion.
+  DelegatedGrantAssertionSource assertion_source = 2;
+  // `aud` of the SPIFFE workload assertion. Empty derives it from
+  // token_endpoint.
+  string assertion_audience = 3;
+  // OAuth 2.0 `client_assertion_type`. Empty uses RFC 7523 jwt-bearer.
+  string client_assertion_type = 4;
+  // Grant the supervisor requests from token_endpoint.
+  DelegatedGrantType grant_type = 5;
+  // Host patterns whose requests use this grant. At least one is required.
+  // Patterns use network policy host syntax.
+  repeated string include_hosts = 6;
+  // Host patterns removed from include_hosts. Exclusion wins.
+  repeated string exclude_hosts = 7;
+  // OAuth 2.0 scopes sent with every grant request.
+  repeated string scopes = 8;
+  // RFC 8693 `subject_token_type` of the workload's bearer token. Only for
+  // DELEGATED_GRANT_TYPE_TOKEN_EXCHANGE. Empty uses
+  // `urn:ietf:params:oauth:token-type:access_token`.
+  string subject_token_type = 9;
+}
+
+// Workload identity presented to a delegated grant's authorization server.
+enum DelegatedGrantAssertionSource {
+  DELEGATED_GRANT_ASSERTION_SOURCE_UNSPECIFIED = 0;
+  // JWT-SVID from the sandbox instance's SPIFFE Workload API socket.
+  DELEGATED_GRANT_ASSERTION_SOURCE_SPIFFE = 1;
+}
+
+// OAuth 2.0 grant a delegated grant requests.
+enum DelegatedGrantType {
+  // Treated as DELEGATED_GRANT_TYPE_CLIENT_CREDENTIALS.
+  DELEGATED_GRANT_TYPE_UNSPECIFIED = 0;
+  // Client credentials grant authenticated by the workload assertion.
+  DELEGATED_GRANT_TYPE_CLIENT_CREDENTIALS = 1;
+  // RFC 8693 token exchange. The workload assertion is the client assertion.
+  // The subject token is the user-delegated bearer token the workload sends
+  // in `Authorization`; a request without exactly one is refused.
+  DELEGATED_GRANT_TYPE_TOKEN_EXCHANGE = 2;
 }
 
 // Connection details for one operator-registered supervisor middleware service.

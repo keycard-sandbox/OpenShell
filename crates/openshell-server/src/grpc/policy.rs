@@ -3096,6 +3096,7 @@ pub async fn build_sandbox_config_snapshot_from_inputs(
         global_policy_version,
         provider_env_revision,
         supervisor_middleware_services,
+        delegated_credential_grant: None,
         workspace,
         policy_validation_failure_mode: state
             .config
@@ -3130,6 +3131,7 @@ fn sandbox_config_response(snapshot: SandboxConfigSnapshot) -> GetSandboxConfigR
         configuration_admitted: snapshot.configuration_admitted,
         configuration_error: snapshot.configuration_error,
         configuration_instance_id: snapshot.configuration_instance_id,
+        delegated_credential_grant: snapshot.delegated_credential_grant,
     }
 }
 

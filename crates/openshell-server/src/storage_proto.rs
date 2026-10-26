@@ -156,8 +156,11 @@ mod tests {
     // Sandbox-wide grant reporting adds TokenGrantFailureObservation to both
     // closures and TokenGrantStatus to public reports. Older rows have no grant
     // record; absent report extensions retain compatibility without a rewrite.
+    // Sandbox config field 18 adds DelegatedCredentialGrant and its two enums
+    // to public reports. The gateway reads the grant from its config file and
+    // never stores it.
     const PUBLIC_RPC_SCHEMA_SHA256: &str =
-        "a91e2244a2c1a8e369efe85bd0e4f2769f0f29f6263137280fe38e8a8da3cc6e";
+        "7b297d88237b55604d8fda450b96971be67dbb6a72049b6647a401201f6d7c65";
     const DURABLE_SCHEMA_SHA256: &str =
         "d4dc7abdb91b919db1f7be0d4652e30cbfda86f3b2ed9b59d5de1f76a2bf691d";
     const PUBLIC_DURABLE_OVERLAP_SHA256: &str =
@@ -695,7 +698,7 @@ mod tests {
                 overlap_hash.as_str(),
             ),
             (
-                (328, 29),
+                (329, 31),
                 (95, 22),
                 (83, 22),
                 PUBLIC_RPC_SCHEMA_SHA256,

@@ -4804,6 +4804,7 @@ network_policies:
             configuration_error: String::new(),
             configuration_instance_id: String::new(),
             settings_revision: 0,
+            delegated_credential_grant: None,
         }
     }
 
