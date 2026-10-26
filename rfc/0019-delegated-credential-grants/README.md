@@ -196,6 +196,13 @@ file current. Any issuer the authorization server trusts works: a Kubernetes
 projected service account token, an AWS STS `GetWebIdentityToken` result, or a
 CI job's OIDC token. OpenShell does not call a vendor API.
 
+On Kubernetes, the driver's `delegated_grant_token_audience` adds a second
+projected service account token to the supervisor pod, at
+`/var/run/secrets/openshell/delegated-grant-token`. Its audience is the
+authorization server's, so it cannot log in to the gateway, and the gateway
+token, whose audience is `openshell-gateway`, never leaves the pod. The driver
+rejects `openshell-gateway` as the grant audience.
+
 The supervisor reads the file on every grant request, so a replaced token
 applies to the next grant request. The supervisor checks only that the file
 holds a JWT of at most 64 KiB with an `exp` claim that has not passed. The
@@ -241,7 +248,9 @@ The change is opt-in. A gateway without the section behaves as before.
   upstream request.
 - **The assertion file is a credential.** Anything that can read the file can
   authenticate as the workload until the JWT expires. The file must be readable
-  by the supervisor and not by the agent.
+  by the supervisor and not by the agent. The Kubernetes driver's
+  `delegated_grant_token_audience` projects a service account token into the
+  supervisor pod only.
 - **Shared file identity.** The authorization server sees whatever subject the
   file's issuer chose. If the platform writes the same JWT for every sandbox,
   the authorization server cannot tell sandboxes apart.

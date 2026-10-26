@@ -201,6 +201,11 @@ struct Args {
     #[arg(long, env = "OPENSHELL_PROVIDER_SPIFFE_WORKLOAD_API_SOCKET")]
     provider_spiffe_workload_api_socket_path: Option<String>,
 
+    /// Audience of the projected `ServiceAccount` token each supervisor pod
+    /// presents to the delegated grant's authorization server. Unset omits it.
+    #[arg(long, env = "OPENSHELL_K8S_DELEGATED_GRANT_TOKEN_AUDIENCE")]
+    delegated_grant_token_audience: Option<String>,
+
     #[arg(long, env = "OPENSHELL_K8S_SANDBOX_UID")]
     sandbox_uid: Option<u32>,
 
@@ -325,6 +330,7 @@ async fn main() -> Result<()> {
             provider_spiffe_workload_api_socket_path: args
                 .provider_spiffe_workload_api_socket_path
                 .unwrap_or_default(),
+            delegated_grant_token_audience: args.delegated_grant_token_audience.unwrap_or_default(),
             sandbox_uid: args.sandbox_uid,
             sandbox_gid: args.sandbox_gid,
         },

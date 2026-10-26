@@ -604,6 +604,8 @@ For each selected request, the supervisor requests a token with the request orig
 
 With `file`, the platform that runs the sandbox obtains the JWT and writes it to `assertion_file`. Any OIDC issuer the authorization server trusts works, such as an AWS STS `GetWebIdentityToken` result. The supervisor reads the file on every grant request, so replace the file before the JWT expires. The supervisor checks that the file holds a JWT with an `exp` claim that has not passed. The authorization server verifies the signature. Mount the file where the supervisor can read it and the agent cannot.
 
+On Kubernetes, the driver can supply the file. Set the driver's `delegated_grant_token_audience` to the audience the authorization server expects, and set `assertion_file = "/var/run/secrets/openshell/delegated-grant-token"`. The kubelet writes a service account token for that audience into each supervisor pod and replaces it before it expires. The agent's pod does not get it. The authorization server must trust the cluster's service account issuer. The token's `sub` is the namespace's service account, and its `kubernetes.io.pod.name` claim is the supervisor pod, `os-supervisor-<sandbox-id>`.
+
 The supervisor answers with HTTP 403 when:
 
 - The token endpoint is `https://` and answers HTTP 400, 401, or 403 with `error` set to `access_denied`, `invalid_target`, `unauthorized_client`, `invalid_grant`, or `insufficient_authorization`.
@@ -1035,6 +1037,11 @@ sa_token_ttl_secs              = 3600
 # shared roots such as /run, /var, /tmp, and /etc are rejected.
 # Supervisor-to-gateway auth still uses gateway JWTs.
 provider_spiffe_workload_api_socket_path = "/spiffe-workload-api/spire-agent.sock"
+# Optional audience of a second projected ServiceAccount token at
+# /var/run/secrets/openshell/delegated-grant-token in each supervisor pod, for
+# the delegated credential grant's file assertion source. It uses
+# sa_token_ttl_secs. "openshell-gateway" is rejected.
+# delegated_grant_token_audience = "https://auth.example.com"
 # Explicit sandbox UID/GID for the supervisor container securityContext and
 # PVC init container. When unset, the driver auto-detects from OpenShift SCC
 # namespace annotations (openshift.io/sa.scc.uid-range) if present, falling
