@@ -376,6 +376,10 @@ pub struct ServerState {
     /// Validated built-in and operator-registered supervisor middleware.
     pub middleware_registry: Arc<MiddlewareRegistry>,
 
+    /// Gateway-configured delegated credential grant. `None` when
+    /// `[openshell.supervisor.delegated_grant]` is absent.
+    pub(crate) delegated_grant: Option<openshell_core::proto::DelegatedCredentialGrant>,
+
     /// OIDC JWKS cache for JWT validation. `None` when OIDC is not configured.
     pub oidc_cache: Option<Arc<auth::oidc::JwksCache>>,
 
@@ -509,6 +513,7 @@ impl ServerState {
             gateway_peers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             extension_mint_limiter: auth::extension_mint_limit::ExtensionMintLimiter::default(),
             middleware_registry: Arc::new(MiddlewareRegistry::default()),
+            delegated_grant: None,
             oidc_cache,
             extension_jwt_issuer: None,
             sandbox_session_jwt_authority: None,
@@ -634,6 +639,23 @@ pub(crate) async fn run_server(
         .transpose()
         .map_err(|error| Error::config(format!("middleware registration failed: {error}")))?
         .unwrap_or_default();
+    let delegated_grant = config_file
+        .as_ref()
+        .and_then(|file| file.openshell.supervisor.delegated_grant.as_ref())
+        .map(|section| {
+            section
+                .validate()
+                .map_err(|error| Error::config(format!("delegated grant: {error}")))
+        })
+        .transpose()?;
+    if let Some(grant) = &delegated_grant {
+        info!(
+            token_endpoint = %grant.token_endpoint,
+            assertion_source = grant.assertion_source().as_str_name(),
+            include_hosts = ?grant.include_hosts,
+            "delegated credential grant configured"
+        );
+    }
     let mut gateway_extension_credentials = Vec::new();
     let middleware_registry = Arc::new(
         if let Some(issuer) = extension_jwt_issuer.as_ref() {
@@ -784,6 +806,7 @@ pub(crate) async fn run_server(
         credentials,
     );
     state.middleware_registry = middleware_registry;
+    state.delegated_grant = delegated_grant;
     state.gateway_interceptors = gateway_interceptors;
     state.provider_profile_sources = provider_profile_sources;
     state.extension_jwt_issuer = extension_jwt_issuer.clone();
