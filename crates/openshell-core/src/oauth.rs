@@ -407,6 +407,15 @@ fn classify_http_failure(
     let Ok(response) = serde_json::from_slice::<OAuthErrorResponse>(body) else {
         return endpoint_failure(default, status);
     };
+    // An authenticated server's standard refusal of this client, subject or
+    // resource is permanent for the request, so it is classified without the
+    // OpenShell contract. Over plaintext the same codes stay unclassified.
+    if authenticated
+        && matches!(status.as_u16(), 400 | 401 | 403)
+        && let Some(kind) = response.error.as_deref().and_then(standard_refusal_kind)
+    {
+        return endpoint_failure(kind, status);
+    }
     if response.openshell_error_contract.as_deref() != Some(ERROR_CONTRACT) {
         return endpoint_failure(default, status);
     }
@@ -431,6 +440,24 @@ fn classify_http_failure(
         return endpoint_failure(TokenGrantFailureKind::Unclassified, status);
     }
     endpoint_failure(kind, status)
+}
+
+/// Classify a standard OAuth refusal.
+///
+/// - `access_denied` (RFC 6749): policy refused the request.
+/// - `invalid_target` (RFC 8707): the server does not know the resource.
+/// - `unauthorized_client` (RFC 6749): the client may not use this grant.
+/// - `invalid_grant` (RFC 6749): the subject is unknown, expired or not
+///   delegable.
+/// - `insufficient_authorization`: the user has not authorized the resource.
+fn standard_refusal_kind(code: &str) -> Option<TokenGrantFailureKind> {
+    match code {
+        "access_denied" | "invalid_target" | "unauthorized_client" | "invalid_grant" => {
+            Some(TokenGrantFailureKind::AccessDenied)
+        }
+        "insufficient_authorization" => Some(TokenGrantFailureKind::ProviderAuthorizationRequired),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1045,12 +1072,35 @@ mod tests {
         let provider = adopted_failure_body("provider_authorization_required");
         let workload = adopted_failure_body("workload_identity_rejected");
         let configuration = adopted_failure_body("configuration_error");
+        let access_denied = r#"{"error":"access_denied"}"#.to_string();
+        let invalid_target = r#"{"error":"invalid_target"}"#.to_string();
+        let unauthorized_client = r#"{"error":"unauthorized_client"}"#.to_string();
+        let invalid_grant = r#"{"error":"invalid_grant"}"#.to_string();
+        let insufficient = r#"{"error":"insufficient_authorization"}"#.to_string();
         let cases = [
             // Contract codes with their defined status over verified HTTPS.
             (&provider, 409, true, Kind::ProviderAuthorizationRequired),
             (&workload, 401, true, Kind::WorkloadIdentityRejected),
             (&workload, 403, true, Kind::WorkloadIdentityRejected),
             (&configuration, 400, true, Kind::Configuration),
+            // Standard refusals need verified HTTPS and a client error status,
+            // but not the contract marker.
+            (&access_denied, 400, true, Kind::AccessDenied),
+            (&access_denied, 403, true, Kind::AccessDenied),
+            (&invalid_target, 400, true, Kind::AccessDenied),
+            (&invalid_target, 401, true, Kind::AccessDenied),
+            (&unauthorized_client, 400, true, Kind::AccessDenied),
+            (&invalid_grant, 400, true, Kind::AccessDenied),
+            (
+                &insufficient,
+                400,
+                true,
+                Kind::ProviderAuthorizationRequired,
+            ),
+            (&invalid_target, 400, false, Kind::Unclassified),
+            (&insufficient, 400, false, Kind::Unclassified),
+            (&access_denied, 409, true, Kind::Unclassified),
+            (&access_denied, 503, true, Kind::Unavailable),
             // Without verified HTTPS or with a contradicting status, nothing is claimed.
             (&provider, 409, false, Kind::Unclassified),
             (&provider, 503, true, Kind::Unclassified),
