@@ -4443,6 +4443,7 @@ async fn exchange_provider_subject_token_inner(
             subject_token: &stored_subject_token,
             subject_token_type: &subject_token.subject_token_type,
             audience: &supervisor_claims.sub,
+            resource: "",
             scopes: &[],
             requested_token_type: &token_grant.requested_token_type,
         },
@@ -5881,6 +5882,7 @@ mod tests {
                 subject_token: SECRET,
                 subject_token_type: "",
                 audience: SECRET,
+                resource: "",
                 scopes: &[],
                 requested_token_type: "",
             };

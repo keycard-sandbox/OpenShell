@@ -103,6 +103,7 @@ async fn post_oauth_token_request(
     token_endpoint: &str,
     mut form_params: Vec<(&str, &str)>,
     audience: &str,
+    resource: &str,
     scopes: &[String],
     request_id: Option<&str>,
 ) -> Result<OAuthTokenResponse, TokenGrantFailure> {
@@ -115,6 +116,9 @@ async fn post_oauth_token_request(
     if !audience.is_empty() {
         audience_param = audience.to_string();
         form_params.push(("audience", &audience_param));
+    }
+    if !resource.is_empty() {
+        form_params.push(("resource", resource));
     }
 
     let scope_param;
@@ -169,13 +173,15 @@ pub struct TokenGrantParams<'a> {
     pub client_assertion: &'a str,
     pub client_assertion_type: &'a str,
     pub audience: &'a str,
+    /// RFC 8707 resource indicator. Empty omits the parameter.
+    pub resource: &'a str,
     pub scopes: &'a [String],
 }
 
 /// POST a client credentials grant request to an `OAuth2` token endpoint.
 ///
 /// Applies the default for `client_assertion_type` and conditionally includes
-/// `audience` and `scope`. A `request_id` is sent as the
+/// `audience`, `resource` and `scope`. A `request_id` is sent as the
 /// `x-openshell-request-id` header so the token service can log the exchange.
 pub async fn post_oauth_token_grant(
     client: &TokenGrantClient,
@@ -194,6 +200,7 @@ pub async fn post_oauth_token_grant(
         token_endpoint,
         form_params,
         params.audience,
+        params.resource,
         params.scopes,
         request_id,
     )
@@ -209,6 +216,8 @@ pub struct TokenExchangeParams<'a> {
     pub subject_token: &'a str,
     pub subject_token_type: &'a str,
     pub audience: &'a str,
+    /// RFC 8707 resource indicator. Empty omits the parameter.
+    pub resource: &'a str,
     pub scopes: &'a [String],
     pub requested_token_type: &'a str,
 }
@@ -217,7 +226,7 @@ pub struct TokenExchangeParams<'a> {
 ///
 /// Assembles the standard token-exchange form fields, applies defaults for
 /// `client_assertion_type`, `subject_token_type`, and `requested_token_type`,
-/// and conditionally includes `audience` and `scope`. A `request_id` is sent
+/// and conditionally includes `audience`, `resource` and `scope`. A `request_id` is sent
 /// as the `x-openshell-request-id` header.
 pub async fn post_oauth_token_exchange(
     client: &TokenGrantClient,
@@ -241,6 +250,7 @@ pub async fn post_oauth_token_exchange(
         token_endpoint,
         form_params,
         params.audience,
+        params.resource,
         params.scopes,
         request_id,
     )
@@ -633,6 +643,7 @@ mod tests {
             client_assertion: "jwt-svid-token",
             client_assertion_type: "",
             audience: "",
+            resource: "",
             scopes: &[],
         }
     }
@@ -864,6 +875,7 @@ mod tests {
                 subject_token: "subject-access-token",
                 subject_token_type: ACCESS_TOKEN_TYPE,
                 audience: "api://resource",
+                resource: "https://api.example.com",
                 scopes: &scopes,
                 requested_token_type: "urn:ietf:params:oauth:token-type:id_token",
             },
@@ -907,6 +919,10 @@ mod tests {
             Some("api://resource")
         );
         assert_eq!(
+            request.form.get("resource").map(String::as_str),
+            Some("https://api.example.com")
+        );
+        assert_eq!(
             request.form.get("scope").map(String::as_str),
             Some("read write")
         );
@@ -931,6 +947,7 @@ mod tests {
                 subject_token: "subject-token",
                 subject_token_type: "",
                 audience: "",
+                resource: "",
                 scopes: &[],
                 requested_token_type: "",
             },
@@ -957,6 +974,7 @@ mod tests {
             Some(ACCESS_TOKEN_TYPE)
         );
         assert!(!request.form.contains_key("audience"));
+        assert!(!request.form.contains_key("resource"));
         assert!(!request.form.contains_key("scope"));
         assert_eq!(request.request_id, None);
     }
