@@ -17,9 +17,9 @@ token in `Authorization`. If the server refuses, the supervisor denies the
 request with HTTP 403.
 
 The supervisor authenticates with a workload assertion in `client_assertion`.
-The assertion is the sandbox's SPIFFE JWT-SVID. With token exchange, the
-user-delegated access token the agent sends in `Authorization` is the
-`subject_token`. Where a
+The assertion is a SPIFFE JWT-SVID, or a JWT that the platform running the
+sandbox writes to a file. With token exchange, the user-delegated
+access token the agent sends in `Authorization` is the `subject_token`. Where a
 sandbox may go, and with which credential, is then decided by the authorization
 server's own policy. It is not decided by OpenShell configuration.
 
@@ -75,7 +75,8 @@ The operator configures the grant once in `gateway.toml`:
 ```toml
 [openshell.supervisor.delegated_grant]
 token_endpoint = "https://auth.example.com/oauth/token"
-assertion_source = "spiffe"
+assertion_source = "file"               # or "spiffe"
+assertion_file = "/var/run/secrets/openshell/assertion.jwt"
 grant_type = "token_exchange"           # or "client_credentials"
 include_hosts = ["api.github.com", "**.example.com"]
 exclude_hosts = ["status.example.com"]
@@ -99,7 +100,7 @@ sequenceDiagram
 
     Agent->>Supervisor: HTTPS request to api.github.com
     Supervisor->>Supervisor: network policy, L7 policy, middleware
-    Supervisor->>Supervisor: JWT-SVID from the Workload API
+    Supervisor->>Supervisor: JWT-SVID from the Workload API, or JWT from assertion_file
     Supervisor->>AS: token request, resource=https://api.github.com,<br/>client_assertion=workload, subject_token=user token
     AS-->>Supervisor: access_token, or a refusal
     alt granted
@@ -184,6 +185,19 @@ other headers are still acquired. A denial stops every grant for the request.
 provider grants do. The audience defaults to the issuer derived from
 `token_endpoint`.
 
+`file` reads a JWT from `assertion_file`, an absolute path in the supervisor's
+file system. The platform that runs the sandbox obtains the JWT and keeps the
+file current. Any issuer the authorization server trusts works: a Kubernetes
+projected service account token, an AWS STS `GetWebIdentityToken` result, or a
+CI job's OIDC token. OpenShell does not call a vendor API.
+
+The supervisor reads the file on every grant request, so a replaced token
+applies to the next grant request. The supervisor checks only that the file
+holds a JWT of at most 64 KiB with an `exp` claim that has not passed. The
+authorization server verifies the signature and audience. A missing,
+unreadable, or expired file is `unavailable`. A file without a JWT or `exp` is
+a configuration failure. Both answer 502.
+
 ### Observability
 
 - `ConfigStateChange` when a supervisor installs, removes, or rejects a grant.
@@ -209,9 +223,10 @@ The change is opt-in. A gateway without the section behaves as before.
    injection path, map denials to 403, and refuse uninspected traffic to
    selected hosts.
 5. Docs: gateway configuration reference and the failure code table.
-6. Tests: unit tests for config validation, revision hashing, OAuth form
-   fields, and injection outcomes. An e2e test against a local authorization
-   server with a SPIFFE assertion is follow-up work.
+6. Tests: unit tests for config validation, revision hashing, assertion file
+   reads, OAuth form fields, and injection outcomes. An e2e test
+   against a local authorization server with a SPIFFE assertion is follow-up
+   work.
 
 ## Risks
 
@@ -219,6 +234,12 @@ The change is opt-in. A gateway without the section behaves as before.
   selected host waits on a token request. An outage is a 502 for every such
   request. The authorization server must handle one token request per
   upstream request.
+- **The assertion file is a credential.** Anything that can read the file can
+  authenticate as the workload until the JWT expires. The file must be readable
+  by the supervisor and not by the agent.
+- **Shared file identity.** The authorization server sees whatever subject the
+  file's issuer chose. If the platform writes the same JWT for every sandbox,
+  the authorization server cannot tell sandboxes apart.
 - **Classification of standard errors.** Treating `access_denied` and
   `invalid_target` as denials changes the reported code for provider grants
   that see these errors, from `unclassified` to `access_denied`. A gateway
@@ -262,6 +283,13 @@ every gateway, and the authorization server cannot deny a selected request.
 - **RFC 8693 and RFC 8707.** Token exchange with resource indicators lets an
   authorization server issue audience-restricted tokens per resource. The
   supervisor uses the standard parameters.
+- **Web identity token files.** AWS SDKs read `AWS_WEB_IDENTITY_TOKEN_FILE`
+  and pass its contents to `AssumeRoleWithWebIdentity`
+  ([AWS docs](https://docs.aws.amazon.com/sdkref/latest/guide/feature-assume-role-credentials.html)).
+  The kubelet writes projected service account tokens to a file and rotates
+  them when they are older than 80% of their TTL. The application reloads the
+  file ([Kubernetes docs](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/)).
+  `assertion_file` follows the same contract.
 - **Envoy `ext_authz`.** It delegates the allow/deny decision to an external
   service on the hot path. This proposal does the same through an OAuth token
   request, and adds the credential.

@@ -498,7 +498,7 @@ fn token_cache_key(input: TokenCacheKeyInput<'_>) -> String {
 }
 
 /// Get current Unix timestamp in milliseconds.
-fn current_time_ms() -> i64 {
+pub fn current_time_ms() -> i64 {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::from_secs(0))

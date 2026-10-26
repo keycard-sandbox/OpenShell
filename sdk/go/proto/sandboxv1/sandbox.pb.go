@@ -305,6 +305,10 @@ const (
 	DelegatedGrantAssertionSource_DELEGATED_GRANT_ASSERTION_SOURCE_UNSPECIFIED DelegatedGrantAssertionSource = 0
 	// JWT-SVID from the sandbox instance's SPIFFE Workload API socket.
 	DelegatedGrantAssertionSource_DELEGATED_GRANT_ASSERTION_SOURCE_SPIFFE DelegatedGrantAssertionSource = 1
+	// A JWT read from assertion_file on every grant request. Something outside
+	// OpenShell writes the file and replaces the token before it expires. The
+	// authorization server verifies it through its issuer's OIDC discovery.
+	DelegatedGrantAssertionSource_DELEGATED_GRANT_ASSERTION_SOURCE_FILE DelegatedGrantAssertionSource = 2
 )
 
 // Enum value maps for DelegatedGrantAssertionSource.
@@ -312,10 +316,12 @@ var (
 	DelegatedGrantAssertionSource_name = map[int32]string{
 		0: "DELEGATED_GRANT_ASSERTION_SOURCE_UNSPECIFIED",
 		1: "DELEGATED_GRANT_ASSERTION_SOURCE_SPIFFE",
+		2: "DELEGATED_GRANT_ASSERTION_SOURCE_FILE",
 	}
 	DelegatedGrantAssertionSource_value = map[string]int32{
 		"DELEGATED_GRANT_ASSERTION_SOURCE_UNSPECIFIED": 0,
 		"DELEGATED_GRANT_ASSERTION_SOURCE_SPIFFE":      1,
+		"DELEGATED_GRANT_ASSERTION_SOURCE_FILE":        2,
 	}
 )
 
@@ -2494,7 +2500,8 @@ type DelegatedCredentialGrant struct {
 	// Workload identity the supervisor presents as the client assertion.
 	AssertionSource DelegatedGrantAssertionSource `protobuf:"varint,2,opt,name=assertion_source,json=assertionSource,proto3,enum=openshell.sandbox.v1.DelegatedGrantAssertionSource" json:"assertion_source,omitempty"`
 	// `aud` of the SPIFFE workload assertion. Empty derives it from
-	// token_endpoint.
+	// token_endpoint. Not used with DELEGATED_GRANT_ASSERTION_SOURCE_FILE, whose
+	// token already names its audience.
 	AssertionAudience string `protobuf:"bytes,3,opt,name=assertion_audience,json=assertionAudience,proto3" json:"assertion_audience,omitempty"`
 	// OAuth 2.0 `client_assertion_type`. Empty uses RFC 7523 jwt-bearer.
 	ClientAssertionType string `protobuf:"bytes,4,opt,name=client_assertion_type,json=clientAssertionType,proto3" json:"client_assertion_type,omitempty"`
@@ -2511,8 +2518,12 @@ type DelegatedCredentialGrant struct {
 	// DELEGATED_GRANT_TYPE_TOKEN_EXCHANGE. Empty uses
 	// `urn:ietf:params:oauth:token-type:access_token`.
 	SubjectTokenType string `protobuf:"bytes,9,opt,name=subject_token_type,json=subjectTokenType,proto3" json:"subject_token_type,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Absolute path, in the supervisor's filesystem, of the JWT the supervisor
+	// presents with DELEGATED_GRANT_ASSERTION_SOURCE_FILE. Required for that
+	// source and empty otherwise.
+	AssertionFile string `protobuf:"bytes,10,opt,name=assertion_file,json=assertionFile,proto3" json:"assertion_file,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DelegatedCredentialGrant) Reset() {
@@ -2604,6 +2615,13 @@ func (x *DelegatedCredentialGrant) GetScopes() []string {
 func (x *DelegatedCredentialGrant) GetSubjectTokenType() string {
 	if x != nil {
 		return x.SubjectTokenType
+	}
+	return ""
+}
+
+func (x *DelegatedCredentialGrant) GetAssertionFile() string {
+	if x != nil {
+		return x.AssertionFile
 	}
 	return ""
 }
@@ -2919,7 +2937,7 @@ const file_sandbox_proto_rawDesc = "" +
 	"\x1adelegated_credential_grant\x18\x12 \x01(\v2..openshell.sandbox.v1.DelegatedCredentialGrantR\x18delegatedCredentialGrant\x1ac\n" +
 	"\rSettingsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12<\n" +
-	"\x05value\x18\x02 \x01(\v2&.openshell.sandbox.v1.EffectiveSettingR\x05value:\x028\x01\"\xdd\x03\n" +
+	"\x05value\x18\x02 \x01(\v2&.openshell.sandbox.v1.EffectiveSettingR\x05value:\x028\x01\"\x84\x04\n" +
 	"\x18DelegatedCredentialGrant\x12%\n" +
 	"\x0etoken_endpoint\x18\x01 \x01(\tR\rtokenEndpoint\x12^\n" +
 	"\x10assertion_source\x18\x02 \x01(\x0e23.openshell.sandbox.v1.DelegatedGrantAssertionSourceR\x0fassertionSource\x12-\n" +
@@ -2930,7 +2948,9 @@ const file_sandbox_proto_rawDesc = "" +
 	"\rinclude_hosts\x18\x06 \x03(\tR\fincludeHosts\x12#\n" +
 	"\rexclude_hosts\x18\a \x03(\tR\fexcludeHosts\x12\x16\n" +
 	"\x06scopes\x18\b \x03(\tR\x06scopes\x12,\n" +
-	"\x12subject_token_type\x18\t \x01(\tR\x10subjectTokenType\"\xd2\x02\n" +
+	"\x12subject_token_type\x18\t \x01(\tR\x10subjectTokenType\x12%\n" +
+	"\x0eassertion_file\x18\n" +
+	" \x01(\tR\rassertionFile\"\xd2\x02\n" +
 	"\x1bSupervisorMiddlewareService\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12#\n" +
 	"\rgrpc_endpoint\x18\x02 \x01(\tR\fgrpcEndpoint\x12*\n" +
@@ -2960,10 +2980,11 @@ const file_sandbox_proto_rawDesc = "" +
 	"\fPolicySource\x12\x1d\n" +
 	"\x19POLICY_SOURCE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15POLICY_SOURCE_SANDBOX\x10\x01\x12\x18\n" +
-	"\x14POLICY_SOURCE_GLOBAL\x10\x02*~\n" +
+	"\x14POLICY_SOURCE_GLOBAL\x10\x02*\xa9\x01\n" +
 	"\x1dDelegatedGrantAssertionSource\x120\n" +
 	",DELEGATED_GRANT_ASSERTION_SOURCE_UNSPECIFIED\x10\x00\x12+\n" +
-	"'DELEGATED_GRANT_ASSERTION_SOURCE_SPIFFE\x10\x01*\x90\x01\n" +
+	"'DELEGATED_GRANT_ASSERTION_SOURCE_SPIFFE\x10\x01\x12)\n" +
+	"%DELEGATED_GRANT_ASSERTION_SOURCE_FILE\x10\x02*\x90\x01\n" +
 	"\x12DelegatedGrantType\x12$\n" +
 	" DELEGATED_GRANT_TYPE_UNSPECIFIED\x10\x00\x12+\n" +
 	"'DELEGATED_GRANT_TYPE_CLIENT_CREDENTIALS\x10\x01\x12'\n" +
