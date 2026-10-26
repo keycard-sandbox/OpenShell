@@ -486,7 +486,7 @@ pub const SANDBOX_KIND: &str = "Sandbox";
 const SANDBOX_POD_NAME_ANNOTATION: &str = "agents.x-k8s.io/pod-name";
 const SANDBOX_SUSPENDED_CONDITION: &str = "Suspended";
 const SANDBOX_SUSPENDED_POD_NOT_OWNED_REASON: &str = "PodNotOwned";
-const SANDBOX_TOKEN_AUDIENCE: &str = "openshell-gateway";
+pub(crate) const SANDBOX_TOKEN_AUDIENCE: &str = "openshell-gateway";
 const POD_NAME_EXTRA: &str = "authentication.kubernetes.io/pod-name";
 const POD_UID_EXTRA: &str = "authentication.kubernetes.io/pod-uid";
 
@@ -1001,6 +1001,9 @@ impl KubernetesComputeDriver {
             .map_err(KubernetesDriverError::Precondition)?;
         config
             .validate_provider_spiffe_workload_api_socket_path()
+            .map_err(KubernetesDriverError::Precondition)?;
+        config
+            .validate_delegated_grant_token_audience()
             .map_err(KubernetesDriverError::Precondition)?;
         config
             .validate_sandbox_identity_config()
@@ -3141,6 +3144,7 @@ impl KubernetesComputeDriver {
                 main_process_spec,
                 log_level,
                 self.config.effective_sa_token_ttl_secs(),
+                self.config.delegated_grant_token_audience(),
                 self.config.https_proxy.as_deref(),
                 self.config.no_proxy.as_deref(),
                 self.config

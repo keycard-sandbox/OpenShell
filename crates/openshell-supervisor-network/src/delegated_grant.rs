@@ -9,9 +9,10 @@
 //! it. The authorization server decides whether the sandbox may reach the
 //! resource and which credential it gets. A refusal denies the request.
 //!
-//! The supervisor authenticates with the sandbox instance's SPIFFE JWT-SVID in
-//! `client_assertion`. With token exchange, the user-delegated access token
-//! the workload sends in `Authorization` is the `subject_token`.
+//! The supervisor authenticates with a workload assertion in `client_assertion`:
+//! a SPIFFE JWT-SVID, or a JWT that the sandbox platform writes to a
+//! file the supervisor reads. With token exchange, the user-delegated access
+//! token the workload sends in `Authorization` is the `subject_token`.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -34,13 +35,14 @@ use openshell_ocsf::{
     ctx::ctx as ocsf_ctx, ocsf_emit,
 };
 
-use crate::token_grant::{effective_jwt_svid_audience, validate_access_token};
+use crate::token_grant::{current_time_ms, effective_jwt_svid_audience, validate_access_token};
 
 /// A validated delegated grant.
 #[derive(Clone)]
 pub struct DelegatedGrant {
     config: DelegatedCredentialGrant,
     selector: HostSelector,
+    assertion_source: DelegatedGrantAssertionSource,
     grant_type: DelegatedGrantType,
     /// Trusts the platform roots.
     client: Arc<TokenGrantClient>,
@@ -53,11 +55,28 @@ impl DelegatedGrant {
             .map_err(|_| "token_endpoint is not an allowed token endpoint URL")?;
         let selector = HostSelector::new(&config.include_hosts, &config.exclude_hosts)
             .map_err(|_| "include_hosts or exclude_hosts is not a valid host selector")?;
-        match config.assertion_source() {
-            DelegatedGrantAssertionSource::Spiffe => {}
+        let assertion_source = match config.assertion_source() {
             DelegatedGrantAssertionSource::Unspecified => {
                 return Err("assertion_source is unspecified");
             }
+            source => source,
+        };
+        match assertion_source {
+            DelegatedGrantAssertionSource::File
+                if !std::path::Path::new(&config.assertion_file).is_absolute() =>
+            {
+                return Err("assertion_file must be an absolute path");
+            }
+            DelegatedGrantAssertionSource::File if !config.assertion_audience.is_empty() => {
+                return Err("assertion_audience is not used with an assertion file");
+            }
+            DelegatedGrantAssertionSource::Spiffe if !config.assertion_file.is_empty() => {
+                return Err("assertion_file requires the file assertion source");
+            }
+            _ => {}
+        }
+        if config.client_id.chars().any(char::is_whitespace) {
+            return Err("client_id must not contain whitespace");
         }
         let grant_type = match config.grant_type() {
             DelegatedGrantType::Unspecified => DelegatedGrantType::ClientCredentials,
@@ -71,6 +90,7 @@ impl DelegatedGrant {
         Ok(Self {
             config,
             selector,
+            assertion_source,
             grant_type,
             client: Arc::new(client),
         })
@@ -129,8 +149,8 @@ pub trait AssertionFetcher: Send + Sync {
     fn fetch<'a>(&'a self, grant: &'a DelegatedGrant) -> GrantFuture<'a, String>;
 }
 
-/// Fetches JWT-SVIDs from the sandbox instance's SPIFFE Workload API socket.
-/// Without a socket, every fetch fails closed.
+/// Fetches assertions from the sandbox instance's SPIFFE Workload API socket
+/// or the assertion file. A SPIFFE grant without a socket fails closed.
 pub struct WorkloadAssertionFetcher {
     workload_api_socket: Option<PathBuf>,
 }
@@ -138,6 +158,9 @@ pub struct WorkloadAssertionFetcher {
 impl AssertionFetcher for WorkloadAssertionFetcher {
     fn fetch<'a>(&'a self, grant: &'a DelegatedGrant) -> GrantFuture<'a, String> {
         Box::pin(async move {
+            if grant.assertion_source == DelegatedGrantAssertionSource::File {
+                return read_assertion_file(&grant.config.assertion_file);
+            }
             let socket = self.workload_api_socket.as_deref().ok_or_else(|| {
                 TokenGrantFailure::new(
                     TokenGrantFailureKind::Configuration,
@@ -148,6 +171,41 @@ impl AssertionFetcher for WorkloadAssertionFetcher {
                 .await
         })
     }
+}
+
+/// Largest assertion file the supervisor reads.
+const MAX_ASSERTION_FILE_BYTES: u64 = 64 * 1024;
+
+/// Read the JWT in `path`, as it is now.
+///
+/// The file is read on every fetch, so a token that the writer replaces early
+/// takes effect on the next grant request. A missing, unreadable or expired
+/// token is `unavailable`, because the writer may not have replaced it yet. A
+/// file that does not hold a JWT with an `exp` claim is a configuration
+/// failure.
+fn read_assertion_file(path: &str) -> Result<String, TokenGrantFailure> {
+    let failure = |kind| TokenGrantFailure::new(kind, TokenGrantStage::WorkloadIdentity);
+    let file =
+        std::fs::File::open(path).map_err(|_| failure(TokenGrantFailureKind::Unavailable))?;
+    let mut contents = String::new();
+    std::io::Read::read_to_string(
+        &mut std::io::Read::take(file, MAX_ASSERTION_FILE_BYTES + 1),
+        &mut contents,
+    )
+    .map_err(|_| failure(TokenGrantFailureKind::Configuration))?;
+    if contents.len() as u64 > MAX_ASSERTION_FILE_BYTES {
+        return Err(failure(TokenGrantFailureKind::Configuration));
+    }
+    let jwt = contents.trim();
+    if jwt.split('.').count() != 3 || validate_access_token(jwt).is_err() {
+        return Err(failure(TokenGrantFailureKind::Configuration));
+    }
+    let exp = openshell_core::jwt::parse_exp_secs(jwt)
+        .ok_or_else(|| failure(TokenGrantFailureKind::Configuration))?;
+    if exp.saturating_mul(1000) <= current_time_ms() {
+        return Err(failure(TokenGrantFailureKind::Unavailable));
+    }
+    Ok(jwt.to_string())
 }
 
 /// One delegated token request.
@@ -208,6 +266,7 @@ impl<F: AssertionFetcher> TokenEndpointResolver<F> {
                     client,
                     &config.token_endpoint,
                     &TokenExchangeParams {
+                        client_id: &config.client_id,
                         client_assertion: assertion,
                         client_assertion_type: &config.client_assertion_type,
                         subject_token,
@@ -232,6 +291,7 @@ impl<F: AssertionFetcher> TokenEndpointResolver<F> {
                     client,
                     &config.token_endpoint,
                     &TokenGrantParams {
+                        client_id: &config.client_id,
                         client_assertion: assertion,
                         client_assertion_type: &config.client_assertion_type,
                         audience: "",
@@ -447,7 +507,7 @@ mod tests {
     #[test]
     fn from_proto_validates_the_grant() {
         let valid = grant_config("https://as.example.com/token");
-        let cases: [(&str, DelegatedCredentialGrant, Option<&str>); 6] = [
+        let cases: [(&str, DelegatedCredentialGrant, Option<&str>); 12] = [
             ("valid", valid.clone(), None),
             (
                 "plain http endpoint",
@@ -474,6 +534,49 @@ mod tests {
                 Some("assertion_source is unspecified"),
             ),
             (
+                "file without a path",
+                DelegatedCredentialGrant {
+                    assertion_source: DelegatedGrantAssertionSource::File.into(),
+                    ..valid.clone()
+                },
+                Some("assertion_file must be an absolute path"),
+            ),
+            (
+                "file with a relative path",
+                DelegatedCredentialGrant {
+                    assertion_source: DelegatedGrantAssertionSource::File.into(),
+                    assertion_file: "assertion.jwt".into(),
+                    ..valid.clone()
+                },
+                Some("assertion_file must be an absolute path"),
+            ),
+            (
+                "file with an assertion audience",
+                DelegatedCredentialGrant {
+                    assertion_source: DelegatedGrantAssertionSource::File.into(),
+                    assertion_file: "/var/run/openshell/assertion.jwt".into(),
+                    assertion_audience: "https://as.example.com".into(),
+                    ..valid.clone()
+                },
+                Some("assertion_audience is not used with an assertion file"),
+            ),
+            (
+                "spiffe with an assertion file",
+                DelegatedCredentialGrant {
+                    assertion_file: "/var/run/openshell/assertion.jwt".into(),
+                    ..valid.clone()
+                },
+                Some("assertion_file requires the file assertion source"),
+            ),
+            (
+                "client id with whitespace",
+                DelegatedCredentialGrant {
+                    client_id: "acr public".into(),
+                    ..valid.clone()
+                },
+                Some("client_id must not contain whitespace"),
+            ),
+            (
                 "subject token type without token exchange",
                 DelegatedCredentialGrant {
                     subject_token_type: JWT_TOKEN_TYPE.into(),
@@ -486,6 +589,15 @@ mod tests {
                 DelegatedCredentialGrant {
                     grant_type: DelegatedGrantType::TokenExchange.into(),
                     subject_token_type: JWT_TOKEN_TYPE.into(),
+                    ..valid.clone()
+                },
+                None,
+            ),
+            (
+                "file",
+                DelegatedCredentialGrant {
+                    assertion_source: DelegatedGrantAssertionSource::File.into(),
+                    assertion_file: "/var/run/openshell/assertion.jwt".into(),
                     ..valid
                 },
                 None,
@@ -533,6 +645,114 @@ mod tests {
             ("https", "[2001:db8::1]", 8443, "https://[2001:db8::1]:8443"),
         ] {
             assert_eq!(resource_for(scheme, host, port), expected);
+        }
+    }
+
+    /// An unsigned JWT with `claims` as its payload. The supervisor does not
+    /// verify the assertion; the token endpoint does.
+    fn jwt_with_claims(claims: &serde_json::Value) -> String {
+        use base64::Engine;
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        format!(
+            "{}.{}.c2ln",
+            encode(br#"{"alg":"RS256"}"#),
+            encode(claims.to_string().as_bytes())
+        )
+    }
+
+    fn jwt_expiring_at(exp_secs: i64) -> String {
+        jwt_with_claims(&serde_json::json!({ "sub": "workload", "exp": exp_secs }))
+    }
+
+    #[test]
+    fn reads_an_unexpired_jwt_from_the_assertion_file() {
+        let now_secs = current_time_ms() / 1000;
+        let valid = jwt_expiring_at(now_secs + 600);
+        let oversized = format!(
+            "{}{valid}",
+            " ".repeat(usize::try_from(MAX_ASSERTION_FILE_BYTES).unwrap())
+        );
+        // `None` contents leaves the file missing.
+        let cases: [(&str, Option<String>, Result<&str, TokenGrantFailureKind>); 8] = [
+            ("valid", Some(valid.clone()), Ok(&valid)),
+            (
+                "surrounding whitespace is trimmed",
+                Some(format!("\n{valid}\n")),
+                Ok(&valid),
+            ),
+            (
+                "missing file",
+                None,
+                Err(TokenGrantFailureKind::Unavailable),
+            ),
+            (
+                "expired",
+                Some(jwt_expiring_at(now_secs - 1)),
+                Err(TokenGrantFailureKind::Unavailable),
+            ),
+            (
+                "empty",
+                Some(String::new()),
+                Err(TokenGrantFailureKind::Configuration),
+            ),
+            (
+                "not a JWT",
+                Some("opaque-token".into()),
+                Err(TokenGrantFailureKind::Configuration),
+            ),
+            (
+                "no exp claim",
+                Some(jwt_with_claims(&serde_json::json!({ "sub": "workload" }))),
+                Err(TokenGrantFailureKind::Configuration),
+            ),
+            (
+                "over 64 KiB",
+                Some(oversized),
+                Err(TokenGrantFailureKind::Configuration),
+            ),
+        ];
+        for (name, contents, expected) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("assertion.jwt");
+            if let Some(contents) = &contents {
+                std::fs::write(&path, contents).unwrap();
+            }
+            let result = read_assertion_file(path.to_str().unwrap());
+            match expected {
+                Ok(jwt) => {
+                    let assertion = result.unwrap_or_else(|_| panic!("{name}: read failed"));
+                    assert_eq!(assertion, jwt, "{name}");
+                }
+                Err(kind) => {
+                    let Err(failure) = result else {
+                        panic!("{name}: read succeeded");
+                    };
+                    assert_eq!(failure.kind(), kind, "{name}");
+                    assert_eq!(failure.stage(), TokenGrantStage::WorkloadIdentity, "{name}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_file_grant_reads_the_assertion_file_on_every_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assertion.jwt");
+        let grant = DelegatedGrant::from_proto(DelegatedCredentialGrant {
+            assertion_source: DelegatedGrantAssertionSource::File.into(),
+            assertion_file: path.to_str().unwrap().to_string(),
+            ..grant_config("https://as.example.com/token")
+        })
+        .unwrap();
+        let now_secs = current_time_ms() / 1000;
+        for exp_secs in [now_secs + 600, now_secs + 1200] {
+            let jwt = jwt_expiring_at(exp_secs);
+            std::fs::write(&path, &jwt).unwrap();
+            let fetcher = WorkloadAssertionFetcher {
+                workload_api_socket: None,
+            };
+            let assertion = fetcher.fetch(&grant).await.unwrap();
+            assert_eq!(assertion, jwt);
         }
     }
 
@@ -717,6 +937,7 @@ mod tests {
         let grant = DelegatedGrant::from_proto(DelegatedCredentialGrant {
             grant_type: DelegatedGrantType::TokenExchange.into(),
             scopes: vec![],
+            client_id: "acr_public_id".into(),
             ..grant_config(&endpoint)
         })
         .unwrap();
@@ -742,6 +963,7 @@ mod tests {
                     "client_assertion_type={}",
                     oauth::DEFAULT_CLIENT_ASSERTION_TYPE
                 ),
+                "client_id=acr_public_id".to_string(),
                 "grant_type=urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
                 format!("requested_token_type={ACCESS_TOKEN_TYPE}"),
                 "resource=https://api.github.com".to_string(),

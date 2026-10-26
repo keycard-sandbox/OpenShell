@@ -228,6 +228,7 @@ impl SandboxInstanceTokenGrants {
                             http_client,
                             request.token_endpoint,
                             &TokenExchangeParams {
+                                client_id: "",
                                 client_assertion: &jwt_svid,
                                 client_assertion_type: request.client_assertion_type,
                                 subject_token: &intermediate.access_token,
@@ -393,6 +394,7 @@ async fn perform_token_grant(
         http_client,
         token_endpoint,
         &TokenGrantParams {
+            client_id: "",
             client_assertion: jwt_svid,
             client_assertion_type,
             audience,
@@ -498,7 +500,7 @@ fn token_cache_key(input: TokenCacheKeyInput<'_>) -> String {
 }
 
 /// Get current Unix timestamp in milliseconds.
-fn current_time_ms() -> i64 {
+pub fn current_time_ms() -> i64 {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::from_secs(0))

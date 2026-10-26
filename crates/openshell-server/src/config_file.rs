@@ -453,9 +453,18 @@ pub struct DelegatedGrantFileConfig {
     /// Workload identity presented as the client assertion.
     pub assertion_source: DelegatedGrantAssertionSourceFile,
     /// `aud` of the SPIFFE JWT-SVID. Omission derives it from
-    /// `token_endpoint`.
+    /// `token_endpoint`. Refused with `file`, whose token names its audience.
     #[serde(default)]
     pub assertion_audience: Option<String>,
+    /// Absolute path, in the supervisor's filesystem, of the JWT to present.
+    /// Required with `assertion_source = "file"`; refused otherwise.
+    #[serde(default)]
+    pub assertion_file: Option<PathBuf>,
+    /// OAuth 2.0 `client_id` sent with the client assertion. Omission sends
+    /// none, and the authorization server identifies the client from the
+    /// assertion.
+    #[serde(default)]
+    pub client_id: Option<String>,
     /// OAuth 2.0 `client_assertion_type`. Omission uses RFC 7523 jwt-bearer.
     #[serde(default)]
     pub client_assertion_type: Option<String>,
@@ -480,6 +489,7 @@ pub struct DelegatedGrantFileConfig {
 #[serde(rename_all = "snake_case")]
 pub enum DelegatedGrantAssertionSourceFile {
     Spiffe,
+    File,
 }
 
 /// Accepted values of `delegated_grant.grant_type`.
@@ -514,6 +524,16 @@ impl DelegatedGrantFileConfig {
                     "must list at least one valid host pattern, and exclude_hosts must be valid host patterns",
                 )
             })?;
+        if self
+            .client_id
+            .as_deref()
+            .is_some_and(|id| id.is_empty() || id.chars().any(char::is_whitespace))
+        {
+            return Err(invalid(
+                "openshell.supervisor.delegated_grant.client_id",
+                "must not be empty or contain whitespace",
+            ));
+        }
         if self.subject_token_type.is_some()
             && self.grant_type != DelegatedGrantTypeFile::TokenExchange
         {
@@ -522,8 +542,41 @@ impl DelegatedGrantFileConfig {
                 "is only allowed when grant_type = \"token_exchange\"",
             ));
         }
-        let assertion_source = match self.assertion_source {
-            DelegatedGrantAssertionSourceFile::Spiffe => DelegatedGrantAssertionSource::Spiffe,
+        let (assertion_source, assertion_file) = match (self.assertion_source, &self.assertion_file)
+        {
+            (DelegatedGrantAssertionSourceFile::Spiffe, None) => {
+                (DelegatedGrantAssertionSource::Spiffe, String::new())
+            }
+            (DelegatedGrantAssertionSourceFile::Spiffe, Some(_)) => {
+                return Err(invalid(
+                    "openshell.supervisor.delegated_grant.assertion_file",
+                    "is only allowed when assertion_source = \"file\"",
+                ));
+            }
+            (DelegatedGrantAssertionSourceFile::File, None) => {
+                return Err(invalid(
+                    "openshell.supervisor.delegated_grant.assertion_file",
+                    "is required when assertion_source = \"file\"",
+                ));
+            }
+            (DelegatedGrantAssertionSourceFile::File, Some(path)) => {
+                if self.assertion_audience.is_some() {
+                    return Err(invalid(
+                        "openshell.supervisor.delegated_grant.assertion_audience",
+                        "is not allowed when assertion_source = \"file\"; the token names its audience",
+                    ));
+                }
+                let path = path
+                    .to_str()
+                    .filter(|path| Path::new(path).is_absolute())
+                    .ok_or_else(|| {
+                        invalid(
+                            "openshell.supervisor.delegated_grant.assertion_file",
+                            "must be an absolute UTF-8 path",
+                        )
+                    })?;
+                (DelegatedGrantAssertionSource::File, path.to_string())
+            }
         };
         Ok(openshell_core::proto::DelegatedCredentialGrant {
             token_endpoint: self.token_endpoint.clone(),
@@ -544,6 +597,8 @@ impl DelegatedGrantFileConfig {
             exclude_hosts: self.exclude_hosts.clone(),
             scopes: self.scopes.clone(),
             subject_token_type: self.subject_token_type.clone().unwrap_or_default(),
+            assertion_file,
+            client_id: self.client_id.clone().unwrap_or_default(),
         })
     }
 }
@@ -1595,12 +1650,13 @@ timeout = "2s"
     }
 
     #[test]
-    fn parses_delegated_grant() {
+    fn parses_delegated_grant_with_a_file_assertion() {
         let toml = r#"
 [openshell.supervisor.delegated_grant]
 token_endpoint = "https://zone.example.com/oauth/token"
-assertion_source = "spiffe"
-assertion_audience = "https://zone.example.com"
+assertion_source = "file"
+assertion_file = "/var/run/openshell/assertion.jwt"
+client_id = "acr_public_id"
 grant_type = "token_exchange"
 subject_token_type = "urn:ietf:params:oauth:token-type:jwt"
 include_hosts = ["api.github.com", "*.example.org"]
@@ -1620,15 +1676,16 @@ scopes = ["read"]
             grant,
             openshell_core::proto::DelegatedCredentialGrant {
                 token_endpoint: "https://zone.example.com/oauth/token".into(),
-                assertion_source: openshell_core::proto::DelegatedGrantAssertionSource::Spiffe
-                    .into(),
-                assertion_audience: "https://zone.example.com".into(),
+                assertion_source: openshell_core::proto::DelegatedGrantAssertionSource::File.into(),
+                assertion_audience: String::new(),
                 client_assertion_type: String::new(),
                 grant_type: openshell_core::proto::DelegatedGrantType::TokenExchange.into(),
                 include_hosts: vec!["api.github.com".into(), "*.example.org".into()],
                 exclude_hosts: vec!["internal.example.org".into()],
                 scopes: vec!["read".into()],
                 subject_token_type: "urn:ietf:params:oauth:token-type:jwt".into(),
+                assertion_file: "/var/run/openshell/assertion.jwt".into(),
+                client_id: "acr_public_id".into(),
             }
         );
     }
@@ -1638,6 +1695,8 @@ scopes = ["read"]
             token_endpoint: "https://zone.example.com/oauth/token".into(),
             assertion_source: DelegatedGrantAssertionSourceFile::Spiffe,
             assertion_audience: None,
+            assertion_file: None,
+            client_id: None,
             client_assertion_type: None,
             grant_type: DelegatedGrantTypeFile::ClientCredentials,
             subject_token_type: None,
@@ -1650,8 +1709,14 @@ scopes = ["read"]
     #[test]
     fn delegated_grant_validation_names_the_invalid_field() {
         let spiffe = spiffe_grant_config();
+        let file = DelegatedGrantFileConfig {
+            assertion_source: DelegatedGrantAssertionSourceFile::File,
+            assertion_file: Some("/var/run/openshell/assertion.jwt".into()),
+            ..spiffe.clone()
+        };
         let cases = [
             ("spiffe", spiffe.clone(), None),
+            ("file", file.clone(), None),
             (
                 "plaintext endpoint",
                 DelegatedGrantFileConfig {
@@ -1677,6 +1742,30 @@ scopes = ["read"]
                 Some("openshell.supervisor.delegated_grant.include_hosts"),
             ),
             (
+                "client id",
+                DelegatedGrantFileConfig {
+                    client_id: Some("acr_public_id".into()),
+                    ..spiffe.clone()
+                },
+                None,
+            ),
+            (
+                "empty client id",
+                DelegatedGrantFileConfig {
+                    client_id: Some(String::new()),
+                    ..spiffe.clone()
+                },
+                Some("openshell.supervisor.delegated_grant.client_id"),
+            ),
+            (
+                "client id with whitespace",
+                DelegatedGrantFileConfig {
+                    client_id: Some("acr public".into()),
+                    ..spiffe.clone()
+                },
+                Some("openshell.supervisor.delegated_grant.client_id"),
+            ),
+            (
                 "subject token type without token exchange",
                 DelegatedGrantFileConfig {
                     subject_token_type: Some("urn:ietf:params:oauth:token-type:jwt".into()),
@@ -1689,9 +1778,41 @@ scopes = ["read"]
                 DelegatedGrantFileConfig {
                     grant_type: DelegatedGrantTypeFile::TokenExchange,
                     subject_token_type: Some("urn:ietf:params:oauth:token-type:jwt".into()),
-                    ..spiffe
+                    ..spiffe.clone()
                 },
                 None,
+            ),
+            (
+                "assertion file with spiffe",
+                DelegatedGrantFileConfig {
+                    assertion_file: Some("/var/run/openshell/assertion.jwt".into()),
+                    ..spiffe
+                },
+                Some("openshell.supervisor.delegated_grant.assertion_file"),
+            ),
+            (
+                "file without assertion file",
+                DelegatedGrantFileConfig {
+                    assertion_file: None,
+                    ..file.clone()
+                },
+                Some("openshell.supervisor.delegated_grant.assertion_file"),
+            ),
+            (
+                "relative assertion file",
+                DelegatedGrantFileConfig {
+                    assertion_file: Some("assertion.jwt".into()),
+                    ..file.clone()
+                },
+                Some("openshell.supervisor.delegated_grant.assertion_file"),
+            ),
+            (
+                "assertion audience with file",
+                DelegatedGrantFileConfig {
+                    assertion_audience: Some("https://zone.example.com".into()),
+                    ..file
+                },
+                Some("openshell.supervisor.delegated_grant.assertion_audience"),
             ),
         ];
         for (label, config, expected) in cases {

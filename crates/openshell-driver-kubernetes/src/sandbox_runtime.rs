@@ -330,6 +330,7 @@ pub fn supervisor_pod(
     main_process_spec: &str,
     log_level: &str,
     sa_token_ttl_secs: i64,
+    delegated_grant_token_audience: Option<&str>,
     https_proxy: Option<&str>,
     no_proxy: Option<&str>,
     proxy_auth_secret: Option<(&str, &str)>,
@@ -392,20 +393,31 @@ pub fn supervisor_pod(
         volume_mount("run", "/run/openshell", false),
         volume_mount("logs", "/var/log", false),
     ];
+    // Each token's audience limits it to one receiver. The gateway token must
+    // never go to the authorization server, and the grant token cannot log in
+    // to the gateway.
+    let service_account_token = |audience: &str, path: &str| VolumeProjection {
+        service_account_token: Some(ServiceAccountTokenProjection {
+            audience: Some(audience.to_string()),
+            expiration_seconds: Some(sa_token_ttl_secs),
+            path: path.to_string(),
+        }),
+        ..Default::default()
+    };
+    let mut token_sources = vec![service_account_token("openshell-gateway", "token")];
+    if let Some(audience) = delegated_grant_token_audience {
+        token_sources.push(service_account_token(
+            audience,
+            crate::config::DELEGATED_GRANT_TOKEN_FILE,
+        ));
+    }
     let mut volumes = vec![
         secret_volume("bootstrap", &names.supervisor_secret, None),
         Volume {
             name: "sa-token".to_string(),
             projected: Some(ProjectedVolumeSource {
                 default_mode: Some(0o440),
-                sources: Some(vec![VolumeProjection {
-                    service_account_token: Some(ServiceAccountTokenProjection {
-                        audience: Some("openshell-gateway".to_string()),
-                        expiration_seconds: Some(sa_token_ttl_secs),
-                        path: "token".to_string(),
-                    }),
-                    ..Default::default()
-                }]),
+                sources: Some(token_sources),
             }),
             ..Default::default()
         },
@@ -969,6 +981,13 @@ mod tests {
     }
 
     fn supervisor_pod_with_client_tls(client_tls: SupervisorClientTls<'_>) -> Pod {
+        supervisor_pod_with_tokens(client_tls, None)
+    }
+
+    fn supervisor_pod_with_tokens(
+        client_tls: SupervisorClientTls<'_>,
+        delegated_grant_token_audience: Option<&str>,
+    ) -> Pod {
         supervisor_pod(
             "sandbox",
             &SandboxRuntimeNames::new("pair"),
@@ -986,6 +1005,7 @@ mod tests {
             "{}",
             "info",
             600,
+            delegated_grant_token_audience,
             None,
             None,
             None,
@@ -1045,6 +1065,7 @@ mod tests {
             "{}",
             "info",
             600,
+            None,
             None,
             None,
             None,
@@ -1124,6 +1145,85 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_pod_projects_one_token_per_audience() {
+        // Every token uses the configured TTL, 600 in this fixture.
+        struct Case {
+            name: &'static str,
+            grant_audience: Option<&'static str>,
+            /// (audience, path) of each projected token, in order.
+            tokens: &'static [(&'static str, &'static str)],
+        }
+        let cases = [
+            Case {
+                name: "gateway token only",
+                grant_audience: None,
+                tokens: &[("openshell-gateway", "token")],
+            },
+            Case {
+                name: "gateway and delegated grant tokens",
+                grant_audience: Some("https://zone.example.com"),
+                tokens: &[
+                    ("openshell-gateway", "token"),
+                    ("https://zone.example.com", "delegated-grant-token"),
+                ],
+            },
+        ];
+        for Case {
+            name,
+            grant_audience,
+            tokens: expected,
+        } in cases
+        {
+            let pod = supervisor_pod_with_tokens(SupervisorClientTls::Disabled, grant_audience);
+            let spec = pod.spec.expect("Pod spec");
+            let volume = spec
+                .volumes
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .find(|volume| volume.name == "sa-token")
+                .expect("sa-token volume");
+            let projected = volume.projected.as_ref().expect("projected volume");
+            assert_eq!(projected.default_mode, Some(0o440), "{name}");
+            let tokens = projected
+                .sources
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|source| {
+                    let token = source
+                        .service_account_token
+                        .as_ref()
+                        .expect("only service account tokens");
+                    assert_eq!(token.expiration_seconds, Some(600), "{name}");
+                    (
+                        token.audience.clone().unwrap_or_default(),
+                        token.path.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let expected = expected
+                .iter()
+                .map(|(audience, path)| ((*audience).to_string(), (*path).to_string()))
+                .collect::<Vec<_>>();
+            assert_eq!(tokens, expected, "{name}");
+            let mounts = spec.containers[0]
+                .volume_mounts
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .filter(|mount| mount.name == "sa-token")
+                .map(|mount| (mount.mount_path.as_str(), mount.read_only))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                mounts,
+                [("/var/run/secrets/openshell", Some(true))],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn supervisor_verifies_redirected_dials_against_the_configured_host() {
         let pod = supervisor_pod_with_client_tls(SupervisorClientTls::Disabled);
         let env = pod.spec.unwrap().containers[0].env.clone().unwrap();
@@ -1171,6 +1271,7 @@ mod tests {
             "{}",
             "info",
             600,
+            None,
             None,
             None,
             None,
@@ -1429,6 +1530,7 @@ mod tests {
             "{}",
             "info",
             600,
+            None,
             Some("https://proxy.corp.example:3130"),
             None,
             None,

@@ -495,7 +495,8 @@ message DelegatedCredentialGrant {
   // Workload identity the supervisor presents as the client assertion.
   DelegatedGrantAssertionSource assertion_source = 2;
   // `aud` of the SPIFFE workload assertion. Empty derives it from
-  // token_endpoint.
+  // token_endpoint. Not used with DELEGATED_GRANT_ASSERTION_SOURCE_FILE, whose
+  // token already names its audience.
   string assertion_audience = 3;
   // OAuth 2.0 `client_assertion_type`. Empty uses RFC 7523 jwt-bearer.
   string client_assertion_type = 4;
@@ -512,6 +513,14 @@ message DelegatedCredentialGrant {
   // DELEGATED_GRANT_TYPE_TOKEN_EXCHANGE. Empty uses
   // `urn:ietf:params:oauth:token-type:access_token`.
   string subject_token_type = 9;
+  // Absolute path, in the supervisor's filesystem, of the JWT the supervisor
+  // presents with DELEGATED_GRANT_ASSERTION_SOURCE_FILE. Required for that
+  // source and empty otherwise.
+  string assertion_file = 10;
+  // OAuth 2.0 client_id sent with the client assertion (RFC 7521 section
+  // 4.2). It names the authorization server's client record when the
+  // assertion's subject does not. Empty omits the parameter.
+  string client_id = 11;
 }
 
 // Workload identity presented to a delegated grant's authorization server.
@@ -519,6 +528,10 @@ enum DelegatedGrantAssertionSource {
   DELEGATED_GRANT_ASSERTION_SOURCE_UNSPECIFIED = 0;
   // JWT-SVID from the sandbox instance's SPIFFE Workload API socket.
   DELEGATED_GRANT_ASSERTION_SOURCE_SPIFFE = 1;
+  // A JWT read from assertion_file on every grant request. Something outside
+  // OpenShell writes the file and replaces the token before it expires. The
+  // authorization server verifies it through its issuer's OIDC discovery.
+  DELEGATED_GRANT_ASSERTION_SOURCE_FILE = 2;
 }
 
 // OAuth 2.0 grant a delegated grant requests.

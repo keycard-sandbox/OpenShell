@@ -422,6 +422,14 @@ pub struct KubernetesComputeConfig {
         deserialize_with = "deserialize_provider_spiffe_workload_api_socket_path"
     )]
     pub provider_spiffe_workload_api_socket_path: String,
+    /// Audience of a second projected `ServiceAccount` token written to
+    /// `/var/run/secrets/openshell/delegated-grant-token` in each supervisor
+    /// pod, for the gateway's
+    /// delegated credential grant with `assertion_source = "file"`. Set it to
+    /// the authorization server's expected `aud`. Empty (default) omits the
+    /// token. It uses `sa_token_ttl_secs`.
+    #[serde(default)]
+    pub delegated_grant_token_audience: String,
     /// Exact UID shared by `openshell-sandbox`, its agent children, the trusted
     /// workspace/bootstrap init containers, and `openshell-supervisor`.
     /// When empty, the driver auto-detects from `OpenShift` SCC annotations on
@@ -441,6 +449,10 @@ pub struct ManagedSshIngressConfig {
     pub gateway_namespace: String,
     pub gateway_pod_selector: BTreeMap<String, String>,
 }
+
+/// File name, in the supervisor's `/var/run/secrets/openshell` projected
+/// volume, of the token with `delegated_grant_token_audience`.
+pub const DELEGATED_GRANT_TOKEN_FILE: &str = "delegated-grant-token";
 
 /// Lower bound enforced by kubelet for projected SA tokens.
 pub const MIN_SA_TOKEN_TTL_SECS: i64 = 600;
@@ -514,6 +526,7 @@ impl Default for KubernetesComputeConfig {
             allowed_pod_labels: Vec::new(),
             sa_token_ttl_secs: 3600,
             provider_spiffe_workload_api_socket_path: String::new(),
+            delegated_grant_token_audience: String::new(),
             sandbox_uid: None,
             sandbox_gid: None,
         }
@@ -526,6 +539,7 @@ impl KubernetesComputeConfig {
         self.validate_supervisor_topology()?;
         self.validate_workspace_mode()?;
         self.validate_provider_spiffe_workload_api_socket_path()?;
+        self.validate_delegated_grant_token_audience()?;
         self.validate_sandbox_identity_config()?;
         self.validate_proxy_uid()?;
         self.validate_upstream_proxy_config()?;
@@ -608,6 +622,26 @@ impl KubernetesComputeConfig {
             .provider_spiffe_workload_api_socket_path
             .trim()
             .is_empty()
+    }
+
+    /// The delegated grant token audience, or `None` when it is not configured.
+    #[must_use]
+    pub fn delegated_grant_token_audience(&self) -> Option<&str> {
+        Some(self.delegated_grant_token_audience.as_str()).filter(|audience| !audience.is_empty())
+    }
+
+    pub fn validate_delegated_grant_token_audience(&self) -> Result<(), String> {
+        let audience = &self.delegated_grant_token_audience;
+        if audience.chars().any(char::is_whitespace) {
+            return Err("delegated_grant_token_audience must not contain whitespace".to_string());
+        }
+        if audience == crate::driver::SANDBOX_TOKEN_AUDIENCE {
+            return Err(format!(
+                "delegated_grant_token_audience must not be {}, the gateway's audience",
+                crate::driver::SANDBOX_TOKEN_AUDIENCE
+            ));
+        }
+        Ok(())
     }
 
     pub fn validate_provider_spiffe_workload_api_socket_path(&self) -> Result<(), String> {
@@ -1419,6 +1453,37 @@ mod tests {
                     .contains("provider_spiffe_workload_api_socket_path"),
                 "unexpected error for {socket_path}: {err}"
             );
+        }
+    }
+
+    #[test]
+    fn delegated_grant_token_audience_must_not_be_the_gateway_audience() {
+        let cases = [
+            ("", Ok(None)),
+            (
+                "https://zone.example.com",
+                Ok(Some("https://zone.example.com")),
+            ),
+            (
+                "openshell-gateway",
+                Err(
+                    "delegated_grant_token_audience must not be openshell-gateway, the gateway's audience",
+                ),
+            ),
+            (
+                "https://zone.example.com ",
+                Err("delegated_grant_token_audience must not contain whitespace"),
+            ),
+        ];
+        for (audience, expected) in cases {
+            let config: KubernetesComputeConfig = serde_json::from_value(serde_json::json!({
+                "delegated_grant_token_audience": audience
+            }))
+            .unwrap();
+            let result = config
+                .validate_delegated_grant_token_audience()
+                .map(|()| config.delegated_grant_token_audience());
+            assert_eq!(result, expected.map_err(str::to_string), "{audience:?}");
         }
     }
 

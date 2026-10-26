@@ -92,6 +92,7 @@ async fn rejected_grant_log_omits_token_service_error_text() {
             &client,
             &endpoint,
             &TokenExchangeParams {
+                client_id: "",
                 client_assertion: "jwt-svid-token",
                 client_assertion_type: "",
                 subject_token: CANARY,

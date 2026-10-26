@@ -160,7 +160,7 @@ mod tests {
     // to public reports. The gateway reads the grant from its config file and
     // never stores it.
     const PUBLIC_RPC_SCHEMA_SHA256: &str =
-        "7b297d88237b55604d8fda450b96971be67dbb6a72049b6647a401201f6d7c65";
+        "74c153602e8ba11fddac4b26eea170dd92bc8c3926d6ec8906335c66fc930e8d";
     const DURABLE_SCHEMA_SHA256: &str =
         "d4dc7abdb91b919db1f7be0d4652e30cbfda86f3b2ed9b59d5de1f76a2bf691d";
     const PUBLIC_DURABLE_OVERLAP_SHA256: &str =
