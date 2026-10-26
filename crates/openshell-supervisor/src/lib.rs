@@ -582,7 +582,7 @@ pub async fn run_network_proxy(
     }
 
     let extension_credentials = openshell_extension_core::ExtensionCredentialStore::new();
-    let (mut policy, opa_engine, _, _, _, initial_agent_proposals_enabled, _, _) = load_policy(
+    let (mut policy, opa_engine, _, _, _, initial_agent_proposals_enabled, _, _, _) = load_policy(
         None,
         None,
         None,
@@ -1047,6 +1047,7 @@ pub async fn run_sandbox_instance(
         initial_agent_proposals_enabled,
         initial_extension_authentication_enabled,
         captured_provider_environment,
+        initial_delegated_grant,
     ) = load_policy_with_gateway(
         sandbox_id.clone(),
         sandbox.clone(),
@@ -1280,6 +1281,7 @@ pub async fn run_sandbox_instance(
                 provider_workload_api_socket,
                 denial_log,
                 proxy_tls,
+                delegated_grant: initial_delegated_grant,
             },
             denial_tx,
             activity_tx,
@@ -2473,6 +2475,7 @@ async fn load_policy(
     bool,
     bool,
     Option<CapturedProviderEnvironment>,
+    Option<openshell_core::proto::DelegatedCredentialGrant>,
 )> {
     load_policy_with_gateway(
         sandbox_id,
@@ -2515,6 +2518,7 @@ async fn load_policy_with_gateway(
     bool,
     bool,
     Option<CapturedProviderEnvironment>,
+    Option<openshell_core::proto::DelegatedCredentialGrant>,
 )> {
     use openshell_core::proto::ConfigurationAdmissionState;
     // File mode: load OPA engine from rego rules + YAML data (dev override)
@@ -2580,6 +2584,7 @@ async fn load_policy_with_gateway(
             LoadedPolicyOrigin::LocalOverride,
             false,
             false,
+            None,
             None,
         ));
     }
@@ -2955,6 +2960,10 @@ async fn load_policy_with_gateway(
                     captured_provider_credentials,
                     &provider,
                 )),
+                // Installed before the proxy serves a request, so no request to
+                // a selected host leaves without the authorization server's
+                // decision.
+                snapshot.delegated_credential_grant,
             ));
         }
     }
@@ -4804,6 +4813,7 @@ network_policies:
             configuration_error: String::new(),
             configuration_instance_id: String::new(),
             settings_revision: 0,
+            delegated_credential_grant: None,
         }
     }
 
@@ -6484,8 +6494,10 @@ network_policies:
             proposals,
             extension_authentication_enabled,
             provider_credentials,
+            delegated_grant,
         ) = startup().await.expect("load valid local policy");
         assert!(provider_credentials.is_none());
+        assert!(delegated_grant.is_none());
         assert!(proto.is_none());
         assert!(matches!(origin, LoadedPolicyOrigin::LocalOverride));
         assert!(matches!(registry, MiddlewareRegistryStatus::Synchronized));

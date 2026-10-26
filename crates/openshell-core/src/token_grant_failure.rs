@@ -33,6 +33,8 @@ pub enum TokenGrantFailureKind {
     ProviderAuthorizationRequired,
     /// An authenticated component rejected the workload identity.
     WorkloadIdentityRejected,
+    /// An authenticated authorization server refused the requested resource.
+    AccessDenied,
     /// Local configuration or an authenticated configuration contract is invalid.
     Configuration,
     /// A grant operation exceeded its time limit.
@@ -44,9 +46,10 @@ pub enum TokenGrantFailureKind {
 }
 
 impl TokenGrantFailureKind {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::ProviderAuthorizationRequired,
         Self::WorkloadIdentityRejected,
+        Self::AccessDenied,
         Self::Configuration,
         Self::Timeout,
         Self::Unavailable,
@@ -57,6 +60,7 @@ impl TokenGrantFailureKind {
         match self {
             Self::ProviderAuthorizationRequired => "provider_authorization_required",
             Self::WorkloadIdentityRejected => "workload_identity_rejected",
+            Self::AccessDenied => "access_denied",
             Self::Configuration => "configuration_error",
             Self::Timeout => "timeout",
             Self::Unavailable => "unavailable",
@@ -73,7 +77,7 @@ impl TokenGrantFailureKind {
             Self::ProviderAuthorizationRequired => {
                 ProviderCredentialRefreshRecoveryAction::Reauthorize
             }
-            Self::WorkloadIdentityRejected | Self::Configuration => {
+            Self::WorkloadIdentityRejected | Self::AccessDenied | Self::Configuration => {
                 ProviderCredentialRefreshRecoveryAction::FixConfiguration
             }
             Self::Timeout | Self::Unavailable => ProviderCredentialRefreshRecoveryAction::Retry,
@@ -84,7 +88,7 @@ impl TokenGrantFailureKind {
     const fn status_code(self) -> Code {
         match self {
             Self::ProviderAuthorizationRequired | Self::Configuration => Code::FailedPrecondition,
-            Self::WorkloadIdentityRejected => Code::PermissionDenied,
+            Self::WorkloadIdentityRejected | Self::AccessDenied => Code::PermissionDenied,
             Self::Timeout => Code::DeadlineExceeded,
             Self::Unavailable => Code::Unavailable,
             Self::Unclassified => Code::Unknown,
@@ -373,6 +377,11 @@ mod tests {
                 ),
                 (
                     "workload_identity_rejected",
+                    Recovery::FixConfiguration,
+                    Code::PermissionDenied
+                ),
+                (
+                    "access_denied",
                     Recovery::FixConfiguration,
                     Code::PermissionDenied
                 ),

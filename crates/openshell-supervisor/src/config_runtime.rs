@@ -690,6 +690,9 @@ impl ConfigRuntime {
         // Apply OCSF JSON toggle from the `ocsf_json_enabled` setting.
         apply_ocsf_json_setting(&ctx.ocsf_enabled, &result.settings);
         apply_ocsf_schema_version_setting(&ctx.ocsf_schema_version, &result.settings);
+        if let Some(policy_local_ctx) = ctx.policy_local_ctx.as_ref() {
+            policy_local_ctx.install_delegated_grant(result.delegated_credential_grant.as_ref());
+        }
 
         // Apply the agent-proposals feature toggle. On a false→true transition
         // we lazily install the skill so a sandbox that started with the flag
@@ -1278,6 +1281,10 @@ async fn run_policy_poll_loop_with_client<C: PolicyGatewayClient>(
                     }
                     apply_ocsf_json_setting(&ctx.ocsf_enabled, &result.settings);
                     apply_ocsf_schema_version_setting(&ctx.ocsf_schema_version, &result.settings);
+                    if let Some(policy_local_ctx) = ctx.policy_local_ctx.as_ref() {
+                        policy_local_ctx
+                            .install_delegated_grant(result.delegated_credential_grant.as_ref());
+                    }
                     apply_agent_proposals_enabled(
                         &ctx.agent_proposals,
                         agent_proposals_enabled_from_settings(&result.settings),
@@ -1317,6 +1324,10 @@ async fn run_policy_poll_loop_with_client<C: PolicyGatewayClient>(
                 (InitialPollDisposition::TrackOnly, _) => {
                     apply_ocsf_json_setting(&ctx.ocsf_enabled, &result.settings);
                     apply_ocsf_schema_version_setting(&ctx.ocsf_schema_version, &result.settings);
+                    if let Some(policy_local_ctx) = ctx.policy_local_ctx.as_ref() {
+                        policy_local_ctx
+                            .install_delegated_grant(result.delegated_credential_grant.as_ref());
+                    }
                     apply_agent_proposals_enabled(
                         &ctx.agent_proposals,
                         agent_proposals_enabled_from_settings(&result.settings),

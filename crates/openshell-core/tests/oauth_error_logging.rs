@@ -97,6 +97,7 @@ async fn rejected_grant_log_omits_token_service_error_text() {
                 subject_token: CANARY,
                 subject_token_type: "",
                 audience: "",
+                resource: "",
                 scopes: &[],
                 requested_token_type: "",
             },

@@ -668,12 +668,13 @@ Each failure has a code, a stage identifying the failed step, and a recovery act
 |---|---|---|
 | `provider_authorization_required` | Provider authorization is required, including a missing or expired stored subject credential. | `reauthorize` |
 | `workload_identity_rejected` | The workload identity was rejected. | `fix_configuration` |
+| `access_denied` | An `https://` token service refused with HTTP 400, 401, or 403 and the OAuth `error` `access_denied`, `invalid_target`, `unauthorized_client`, or `invalid_grant`. | `fix_configuration` |
 | `configuration_error` | Provider, grant, or token-service configuration is invalid. | `fix_configuration` |
 | `timeout` | A grant step timed out. | `retry` |
 | `unavailable` | A service or connection was unavailable. | `retry` |
 | `unclassified` | No more specific cause is established. | `investigate` |
 
-Without a recognized error extension, HTTP 429, 5xx, and connection failures, including TLS verification failures, are `unavailable`; timeouts are `timeout`. Other failures are `unclassified`, including response bodies over 64 KiB and successful responses without a valid `access_token`. A generic 401 never implies reauthorization.
+Standard OAuth errors with HTTP 400, 401, or 403 from an `https://` token service need no extension. `access_denied`, `invalid_target`, `unauthorized_client`, and `invalid_grant` are `access_denied`. `insufficient_authorization` is `provider_authorization_required`. Without a recognized error, HTTP 429, 5xx, and connection failures, including TLS verification failures, are `unavailable`; timeouts are `timeout`. Other failures are `unclassified`, including response bodies over 64 KiB and successful responses without a valid `access_token`. A generic 401 never implies reauthorization.
 
 A token service can report a specific cause using the `openshell.token-grant.v1` extension. For example, return HTTP 409 with:
 

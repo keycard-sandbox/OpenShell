@@ -233,6 +233,7 @@ impl SandboxInstanceTokenGrants {
                                 subject_token: &intermediate.access_token,
                                 subject_token_type: ACCESS_TOKEN_TYPE,
                                 audience: request.audience,
+                                resource: "",
                                 scopes: request.scopes,
                                 requested_token_type: request.requested_token_type,
                             },
@@ -329,7 +330,7 @@ where
 /// Fetch a JWT-SVID from the SPIRE agent for token grant authentication.
 ///
 /// The JWT-SVID is used as the client assertion in the `OAuth2` grant request.
-async fn fetch_jwt_svid_from_socket(
+pub async fn fetch_jwt_svid_from_socket(
     socket_path: &std::path::Path,
     audience: &str,
 ) -> Result<String, TokenGrantFailure> {
@@ -395,6 +396,7 @@ async fn perform_token_grant(
             client_assertion: jwt_svid,
             client_assertion_type,
             audience,
+            resource: "",
             scopes,
         },
         Some(request_id),
@@ -456,7 +458,7 @@ fn derive_issuer_from_token_endpoint(token_endpoint: &str) -> String {
     token_endpoint.to_string()
 }
 
-fn effective_jwt_svid_audience(token_endpoint: &str, jwt_svid_audience: &str) -> String {
+pub fn effective_jwt_svid_audience(token_endpoint: &str, jwt_svid_audience: &str) -> String {
     if jwt_svid_audience.is_empty() {
         derive_issuer_from_token_endpoint(token_endpoint)
     } else {

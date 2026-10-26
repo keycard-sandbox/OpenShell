@@ -3053,6 +3053,7 @@ pub async fn build_sandbox_config_snapshot_from_inputs(
     let settings = merge_effective_settings(global_settings, &sandbox_settings)?;
     let supervisor_middleware_services =
         state.middleware_registry.required_services(policy.as_ref());
+    let delegated_credential_grant = state.delegated_grant.clone();
     let config_revision = compute_config_revision_with_validation_mode(
         policy.as_ref(),
         &settings,
@@ -3060,6 +3061,7 @@ pub async fn build_sandbox_config_snapshot_from_inputs(
         &supervisor_middleware_services,
         state.config.policy_validation_failure_mode,
         state.extension_jwt_issuer.is_some(),
+        delegated_credential_grant.as_ref(),
     );
     if let Some(policy) = policy.as_ref() {
         validate_policy_credential_binding_context(
@@ -3096,6 +3098,7 @@ pub async fn build_sandbox_config_snapshot_from_inputs(
         global_policy_version,
         provider_env_revision,
         supervisor_middleware_services,
+        delegated_credential_grant,
         workspace,
         policy_validation_failure_mode: state
             .config
@@ -3130,6 +3133,7 @@ fn sandbox_config_response(snapshot: SandboxConfigSnapshot) -> GetSandboxConfigR
         configuration_admitted: snapshot.configuration_admitted,
         configuration_error: snapshot.configuration_error,
         configuration_instance_id: snapshot.configuration_instance_id,
+        delegated_credential_grant: snapshot.delegated_credential_grant,
     }
 }
 
@@ -6897,6 +6901,7 @@ fn compute_config_revision_with_validation_mode(
     supervisor_middleware_services: &[openshell_core::proto::SupervisorMiddlewareService],
     policy_validation_failure_mode: openshell_core::PolicyValidationFailureMode,
     extension_authentication_enabled: bool,
+    delegated_credential_grant: Option<&openshell_core::proto::DelegatedCredentialGrant>,
 ) -> u64 {
     let mut hasher = Sha256::new();
     hasher.update((policy_source as i32).to_le_bytes());
@@ -6936,6 +6941,9 @@ fn compute_config_revision_with_validation_mode(
     for service in middleware {
         hasher.update(service.encode_to_vec());
     }
+    if let Some(grant) = delegated_credential_grant {
+        hasher.update(grant.encode_to_vec());
+    }
 
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];
@@ -6957,6 +6965,7 @@ fn compute_config_revision(
         supervisor_middleware_services,
         openshell_core::PolicyValidationFailureMode::default(),
         false,
+        None,
     )
 }
 
@@ -23113,6 +23122,7 @@ mod tests {
             &[],
             openshell_core::PolicyValidationFailureMode::FailClosed,
             false,
+            None,
         );
         let retain_last_valid = compute_config_revision_with_validation_mode(
             Some(&policy),
@@ -23121,8 +23131,43 @@ mod tests {
             &[],
             openshell_core::PolicyValidationFailureMode::RetainLastValid,
             false,
+            None,
         );
         assert_ne!(fail_closed, retain_last_valid);
+    }
+
+    #[test]
+    fn config_revision_changes_when_delegated_grant_changes() {
+        let policy = ProtoSandboxPolicy::default();
+        let settings = HashMap::new();
+        let revision = |grant: Option<&openshell_core::proto::DelegatedCredentialGrant>| {
+            compute_config_revision_with_validation_mode(
+                Some(&policy),
+                &settings,
+                PolicySource::Sandbox,
+                &[],
+                openshell_core::PolicyValidationFailureMode::FailClosed,
+                false,
+                grant,
+            )
+        };
+        let grant = openshell_core::proto::DelegatedCredentialGrant {
+            token_endpoint: "https://as.example.com/token".to_string(),
+            include_hosts: vec!["api.example.com".to_string()],
+            ..Default::default()
+        };
+        let widened = openshell_core::proto::DelegatedCredentialGrant {
+            include_hosts: vec!["api.example.com".to_string(), "*.example.org".to_string()],
+            ..grant.clone()
+        };
+        let revisions = [
+            revision(None),
+            revision(Some(&grant)),
+            revision(Some(&widened)),
+        ];
+        assert_ne!(revisions[0], revisions[1]);
+        assert_ne!(revisions[1], revisions[2]);
+        assert_eq!(revisions[1], revision(Some(&grant)));
     }
 
     #[test]
@@ -23137,6 +23182,7 @@ mod tests {
             &[],
             openshell_core::PolicyValidationFailureMode::FailClosed,
             false,
+            None,
         );
         let enabled = compute_config_revision_with_validation_mode(
             Some(&policy),
@@ -23145,6 +23191,7 @@ mod tests {
             &[],
             openshell_core::PolicyValidationFailureMode::FailClosed,
             true,
+            None,
         );
         assert_ne!(disabled, enabled);
     }

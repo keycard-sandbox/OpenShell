@@ -1764,6 +1764,8 @@ pub struct SettingsPollResult {
     pub policy_validation_failure_mode: crate::PolicyValidationFailureMode,
     /// Whether the gateway can mint authenticated extension credentials.
     pub extension_authentication_enabled: bool,
+    /// Gateway-configured delegated credential grant, if any.
+    pub delegated_credential_grant: Option<crate::proto::DelegatedCredentialGrant>,
 }
 
 fn settings_poll_result(inner: crate::proto::GetSandboxConfigResponse) -> SettingsPollResult {
@@ -1789,6 +1791,7 @@ fn settings_poll_result(inner: crate::proto::GetSandboxConfigResponse) -> Settin
             .parse()
             .unwrap_or_default(),
         extension_authentication_enabled: inner.extension_authentication_enabled,
+        delegated_credential_grant: inner.delegated_credential_grant,
     }
 }
 
@@ -1814,6 +1817,7 @@ impl From<crate::proto::SandboxConfigSnapshot> for SettingsPollResult {
             configuration_instance_id: snapshot.configuration_instance_id,
             configuration_error: snapshot.configuration_error,
             settings_revision: snapshot.settings_revision,
+            delegated_credential_grant: snapshot.delegated_credential_grant,
         })
     }
 }

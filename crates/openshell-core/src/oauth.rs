@@ -103,6 +103,7 @@ async fn post_oauth_token_request(
     token_endpoint: &str,
     mut form_params: Vec<(&str, &str)>,
     audience: &str,
+    resource: &str,
     scopes: &[String],
     request_id: Option<&str>,
 ) -> Result<OAuthTokenResponse, TokenGrantFailure> {
@@ -115,6 +116,9 @@ async fn post_oauth_token_request(
     if !audience.is_empty() {
         audience_param = audience.to_string();
         form_params.push(("audience", &audience_param));
+    }
+    if !resource.is_empty() {
+        form_params.push(("resource", resource));
     }
 
     let scope_param;
@@ -169,13 +173,15 @@ pub struct TokenGrantParams<'a> {
     pub client_assertion: &'a str,
     pub client_assertion_type: &'a str,
     pub audience: &'a str,
+    /// RFC 8707 resource indicator. Empty omits the parameter.
+    pub resource: &'a str,
     pub scopes: &'a [String],
 }
 
 /// POST a client credentials grant request to an `OAuth2` token endpoint.
 ///
 /// Applies the default for `client_assertion_type` and conditionally includes
-/// `audience` and `scope`. A `request_id` is sent as the
+/// `audience`, `resource` and `scope`. A `request_id` is sent as the
 /// `x-openshell-request-id` header so the token service can log the exchange.
 pub async fn post_oauth_token_grant(
     client: &TokenGrantClient,
@@ -194,6 +200,7 @@ pub async fn post_oauth_token_grant(
         token_endpoint,
         form_params,
         params.audience,
+        params.resource,
         params.scopes,
         request_id,
     )
@@ -209,6 +216,8 @@ pub struct TokenExchangeParams<'a> {
     pub subject_token: &'a str,
     pub subject_token_type: &'a str,
     pub audience: &'a str,
+    /// RFC 8707 resource indicator. Empty omits the parameter.
+    pub resource: &'a str,
     pub scopes: &'a [String],
     pub requested_token_type: &'a str,
 }
@@ -217,7 +226,7 @@ pub struct TokenExchangeParams<'a> {
 ///
 /// Assembles the standard token-exchange form fields, applies defaults for
 /// `client_assertion_type`, `subject_token_type`, and `requested_token_type`,
-/// and conditionally includes `audience` and `scope`. A `request_id` is sent
+/// and conditionally includes `audience`, `resource` and `scope`. A `request_id` is sent
 /// as the `x-openshell-request-id` header.
 pub async fn post_oauth_token_exchange(
     client: &TokenGrantClient,
@@ -241,6 +250,7 @@ pub async fn post_oauth_token_exchange(
         token_endpoint,
         form_params,
         params.audience,
+        params.resource,
         params.scopes,
         request_id,
     )
@@ -397,6 +407,15 @@ fn classify_http_failure(
     let Ok(response) = serde_json::from_slice::<OAuthErrorResponse>(body) else {
         return endpoint_failure(default, status);
     };
+    // An authenticated server's standard refusal of this client, subject or
+    // resource is permanent for the request, so it is classified without the
+    // OpenShell contract. Over plaintext the same codes stay unclassified.
+    if authenticated
+        && matches!(status.as_u16(), 400 | 401 | 403)
+        && let Some(kind) = response.error.as_deref().and_then(standard_refusal_kind)
+    {
+        return endpoint_failure(kind, status);
+    }
     if response.openshell_error_contract.as_deref() != Some(ERROR_CONTRACT) {
         return endpoint_failure(default, status);
     }
@@ -421,6 +440,24 @@ fn classify_http_failure(
         return endpoint_failure(TokenGrantFailureKind::Unclassified, status);
     }
     endpoint_failure(kind, status)
+}
+
+/// Classify a standard OAuth refusal.
+///
+/// - `access_denied` (RFC 6749): policy refused the request.
+/// - `invalid_target` (RFC 8707): the server does not know the resource.
+/// - `unauthorized_client` (RFC 6749): the client may not use this grant.
+/// - `invalid_grant` (RFC 6749): the subject is unknown, expired or not
+///   delegable.
+/// - `insufficient_authorization`: the user has not authorized the resource.
+fn standard_refusal_kind(code: &str) -> Option<TokenGrantFailureKind> {
+    match code {
+        "access_denied" | "invalid_target" | "unauthorized_client" | "invalid_grant" => {
+            Some(TokenGrantFailureKind::AccessDenied)
+        }
+        "insufficient_authorization" => Some(TokenGrantFailureKind::ProviderAuthorizationRequired),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -633,6 +670,7 @@ mod tests {
             client_assertion: "jwt-svid-token",
             client_assertion_type: "",
             audience: "",
+            resource: "",
             scopes: &[],
         }
     }
@@ -864,6 +902,7 @@ mod tests {
                 subject_token: "subject-access-token",
                 subject_token_type: ACCESS_TOKEN_TYPE,
                 audience: "api://resource",
+                resource: "https://api.example.com",
                 scopes: &scopes,
                 requested_token_type: "urn:ietf:params:oauth:token-type:id_token",
             },
@@ -907,6 +946,10 @@ mod tests {
             Some("api://resource")
         );
         assert_eq!(
+            request.form.get("resource").map(String::as_str),
+            Some("https://api.example.com")
+        );
+        assert_eq!(
             request.form.get("scope").map(String::as_str),
             Some("read write")
         );
@@ -931,6 +974,7 @@ mod tests {
                 subject_token: "subject-token",
                 subject_token_type: "",
                 audience: "",
+                resource: "",
                 scopes: &[],
                 requested_token_type: "",
             },
@@ -957,6 +1001,7 @@ mod tests {
             Some(ACCESS_TOKEN_TYPE)
         );
         assert!(!request.form.contains_key("audience"));
+        assert!(!request.form.contains_key("resource"));
         assert!(!request.form.contains_key("scope"));
         assert_eq!(request.request_id, None);
     }
@@ -1027,12 +1072,35 @@ mod tests {
         let provider = adopted_failure_body("provider_authorization_required");
         let workload = adopted_failure_body("workload_identity_rejected");
         let configuration = adopted_failure_body("configuration_error");
+        let access_denied = r#"{"error":"access_denied"}"#.to_string();
+        let invalid_target = r#"{"error":"invalid_target"}"#.to_string();
+        let unauthorized_client = r#"{"error":"unauthorized_client"}"#.to_string();
+        let invalid_grant = r#"{"error":"invalid_grant"}"#.to_string();
+        let insufficient = r#"{"error":"insufficient_authorization"}"#.to_string();
         let cases = [
             // Contract codes with their defined status over verified HTTPS.
             (&provider, 409, true, Kind::ProviderAuthorizationRequired),
             (&workload, 401, true, Kind::WorkloadIdentityRejected),
             (&workload, 403, true, Kind::WorkloadIdentityRejected),
             (&configuration, 400, true, Kind::Configuration),
+            // Standard refusals need verified HTTPS and a client error status,
+            // but not the contract marker.
+            (&access_denied, 400, true, Kind::AccessDenied),
+            (&access_denied, 403, true, Kind::AccessDenied),
+            (&invalid_target, 400, true, Kind::AccessDenied),
+            (&invalid_target, 401, true, Kind::AccessDenied),
+            (&unauthorized_client, 400, true, Kind::AccessDenied),
+            (&invalid_grant, 400, true, Kind::AccessDenied),
+            (
+                &insufficient,
+                400,
+                true,
+                Kind::ProviderAuthorizationRequired,
+            ),
+            (&invalid_target, 400, false, Kind::Unclassified),
+            (&insufficient, 400, false, Kind::Unclassified),
+            (&access_denied, 409, true, Kind::Unclassified),
+            (&access_denied, 503, true, Kind::Unavailable),
             // Without verified HTTPS or with a contradicting status, nothing is claimed.
             (&provider, 409, false, Kind::Unclassified),
             (&provider, 503, true, Kind::Unclassified),
