@@ -210,6 +210,9 @@ pub struct SandboxInstanceNetwork {
     pub denial_log: DenialLogSource,
     /// Proxy interception CA and trust-file directory.
     pub proxy_tls: ProxyTlsFiles,
+    /// Delegated grant from the startup configuration. It is installed
+    /// before the proxy accepts a connection.
+    pub delegated_grant: Option<openshell_core::proto::DelegatedCredentialGrant>,
 }
 
 /// Provisioned proxy CA files and the directory that receives trust files.
@@ -307,7 +310,12 @@ pub async fn run_networking(
         provider_workload_api_socket,
         denial_log,
         proxy_tls,
+        delegated_grant,
     } = instance;
+    let delegated_grant_slot = Arc::new(crate::delegated_grant::DelegatedGrantSlot::new(
+        provider_workload_api_socket.clone(),
+    ));
+    delegated_grant_slot.install(delegated_grant.as_ref());
     let token_grants = SpiffeTokenGrantResolver::new(SandboxInstanceTokenGrants::new(
         gateway.clone(),
         sandbox_id.clone(),
@@ -322,7 +330,8 @@ pub async fn run_networking(
             workspace_rx,
         )
         .with_denial_log(denial_log)
-        .with_token_grants(Arc::new(token_grants)),
+        .with_token_grants(Arc::new(token_grants))
+        .with_delegated_grant(delegated_grant_slot),
     );
 
     // Readiness signal for the proxy accept loop: the proxy binds the TCP

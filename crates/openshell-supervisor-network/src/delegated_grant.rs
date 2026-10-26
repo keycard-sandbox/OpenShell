@@ -15,7 +15,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use openshell_core::host_pattern::HostSelector;
 use openshell_core::oauth::{
@@ -27,6 +27,9 @@ use openshell_core::proto::{
 };
 use openshell_core::token_grant_failure::{
     TokenGrantFailure, TokenGrantFailureKind, TokenGrantStage,
+};
+use openshell_ocsf::{
+    ConfigStateChangeBuilder, SeverityId, StateId, StatusId, ctx::ctx as ocsf_ctx, ocsf_emit,
 };
 
 use crate::token_grant::{effective_jwt_svid_audience, validate_access_token};
@@ -253,6 +256,131 @@ impl<F: AssertionFetcher> DelegatedGrantResolver for TokenEndpointResolver<F> {
             validate_access_token(&response.access_token)?;
             Ok(response.access_token)
         })
+    }
+}
+
+/// A grant and the resolver that acquires its tokens.
+#[derive(Clone)]
+pub struct DelegatedGrantBinding {
+    pub grant: Arc<DelegatedGrant>,
+    pub resolver: Arc<dyn DelegatedGrantResolver>,
+}
+
+/// The installed grant as requests see it.
+pub enum DelegatedGrantState {
+    /// A valid grant.
+    Active(DelegatedGrantBinding),
+    /// The gateway sent a grant this supervisor rejected. Every request is
+    /// refused, because the hosts it should govern are unknown.
+    Rejected,
+}
+
+impl DelegatedGrantState {
+    /// Whether a request to `host` must get its credential from the grant.
+    #[must_use]
+    pub fn governs(&self, host: &str) -> bool {
+        match self {
+            Self::Active(binding) => binding.grant.selects(host),
+            Self::Rejected => true,
+        }
+    }
+}
+
+/// Holds one sandbox instance's installed grant. Requests read it each time,
+/// so a grant change applies to the next request on every open connection.
+#[derive(Default)]
+pub struct DelegatedGrantSlot {
+    installed: RwLock<Option<(DelegatedCredentialGrant, Arc<DelegatedGrantState>)>>,
+    /// The instance's SPIFFE Workload API socket for SPIFFE assertions.
+    workload_api_socket: Option<PathBuf>,
+}
+
+impl DelegatedGrantSlot {
+    /// An empty slot whose SPIFFE assertions come from `workload_api_socket`.
+    #[must_use]
+    pub fn new(workload_api_socket: Option<PathBuf>) -> Self {
+        Self {
+            installed: RwLock::default(),
+            workload_api_socket: workload_api_socket.filter(|path| !path.as_os_str().is_empty()),
+        }
+    }
+
+    /// The installed grant, if any. A poisoned lock reads as rejected.
+    #[must_use]
+    pub fn current(&self) -> Option<Arc<DelegatedGrantState>> {
+        self.installed.read().map_or_else(
+            |_| Some(Arc::new(DelegatedGrantState::Rejected)),
+            |installed| installed.as_ref().map(|(_, state)| state.clone()),
+        )
+    }
+
+    /// Whether a request to `host` must get its credential from the grant.
+    #[must_use]
+    pub fn governs(&self, host: &str) -> bool {
+        self.current().is_some_and(|state| state.governs(host))
+    }
+
+    /// Install the gateway's current grant. An unchanged grant is not
+    /// reinstalled.
+    ///
+    /// NEVER keep serving a previous grant when the new one is invalid. The new
+    /// grant may govern hosts the old one did not. An invalid grant installs
+    /// [`DelegatedGrantState::Rejected`], which refuses every request.
+    pub fn install(&self, config: Option<&DelegatedCredentialGrant>) {
+        let mut installed = match self.installed.write() {
+            Ok(installed) => installed,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if installed.as_ref().map(|(current, _)| current) == config {
+            return;
+        }
+        let Some(config) = config else {
+            *installed = None;
+            ocsf_emit!(
+                ConfigStateChangeBuilder::new(ocsf_ctx())
+                    .severity(SeverityId::Informational)
+                    .status(StatusId::Success)
+                    .state(StateId::Disabled, "disabled")
+                    .message("delegated credential grant removed")
+                    .build()
+            );
+            return;
+        };
+        let state = match DelegatedGrant::from_proto(config.clone()) {
+            Ok(grant) => {
+                ocsf_emit!(
+                    ConfigStateChangeBuilder::new(ocsf_ctx())
+                        .severity(SeverityId::Informational)
+                        .status(StatusId::Success)
+                        .state(StateId::Enabled, "enabled")
+                        .message(format!(
+                            "delegated credential grant installed for {} host pattern(s)",
+                            config.include_hosts.len()
+                        ))
+                        .build()
+                );
+                DelegatedGrantState::Active(DelegatedGrantBinding {
+                    grant: Arc::new(grant),
+                    resolver: Arc::new(TokenEndpointResolver::new(WorkloadAssertionFetcher {
+                        workload_api_socket: self.workload_api_socket.clone(),
+                    })),
+                })
+            }
+            Err(reason) => {
+                ocsf_emit!(
+                    ConfigStateChangeBuilder::new(ocsf_ctx())
+                        .severity(SeverityId::High)
+                        .status(StatusId::Failure)
+                        .state(StateId::Other, "rejected")
+                        .message(format!(
+                            "delegated credential grant rejected, refusing all requests: {reason}"
+                        ))
+                        .build()
+                );
+                DelegatedGrantState::Rejected
+            }
+        };
+        *installed = Some((config.clone(), Arc::new(state)));
     }
 }
 
@@ -648,5 +776,64 @@ mod tests {
         assert_eq!(token, "granted");
         assert_eq!(resolver.fetcher.fetches.load(Ordering::SeqCst), 2);
         assert_eq!(server.await.unwrap().len(), 2);
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Installed {
+        None,
+        Active,
+        Rejected,
+    }
+
+    fn installed(slot: &DelegatedGrantSlot) -> Installed {
+        match slot.current().as_deref() {
+            None => Installed::None,
+            Some(DelegatedGrantState::Active(_)) => Installed::Active,
+            Some(DelegatedGrantState::Rejected) => Installed::Rejected,
+        }
+    }
+
+    #[test]
+    fn install_rejects_an_invalid_grant_instead_of_keeping_the_previous_one() {
+        let valid = grant_config("https://as.example.com/token");
+        let widened = DelegatedCredentialGrant {
+            include_hosts: vec!["**.example.net".into()],
+            ..valid.clone()
+        };
+        let invalid = DelegatedCredentialGrant {
+            token_endpoint: "http://as.example.com/token".into(),
+            ..widened.clone()
+        };
+        let slot = DelegatedGrantSlot::default();
+        let steps: [(Option<&DelegatedCredentialGrant>, Installed, [bool; 2]); 5] = [
+            (Some(&valid), Installed::Active, [true, false]),
+            (Some(&widened), Installed::Active, [false, true]),
+            (Some(&invalid), Installed::Rejected, [true, true]),
+            (Some(&valid), Installed::Active, [true, false]),
+            (None, Installed::None, [false, false]),
+        ];
+        for (index, (config, expected, governs)) in steps.into_iter().enumerate() {
+            slot.install(config);
+            assert_eq!(installed(&slot), expected, "step {index}");
+            assert_eq!(
+                [
+                    slot.governs("api.example.com"),
+                    slot.governs("api.example.net")
+                ],
+                governs,
+                "step {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn reinstalling_the_same_grant_keeps_its_state() {
+        let config = grant_config("https://as.example.com/token");
+        let slot = DelegatedGrantSlot::default();
+        slot.install(Some(&config));
+        let first = slot.current().unwrap();
+        // An equal grant built separately, as each configuration update delivers.
+        slot.install(Some(&grant_config("https://as.example.com/token")));
+        assert!(Arc::ptr_eq(&first, &slot.current().unwrap()));
     }
 }

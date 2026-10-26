@@ -160,6 +160,7 @@ pub struct PolicyLocalContext {
     sandbox_name: Option<String>,
     denials: DenialLogSource,
     token_grants: Option<Arc<dyn TokenGrantResolver>>,
+    delegated_grant: Option<Arc<crate::delegated_grant::DelegatedGrantSlot>>,
     workspace_rx: tokio::sync::watch::Receiver<String>,
 }
 
@@ -171,6 +172,7 @@ impl std::fmt::Debug for PolicyLocalContext {
             .field("sandbox_name", &self.sandbox_name)
             .field("denials", &self.denials)
             .field("token_grants", &self.token_grants.is_some())
+            .field("delegated_grant", &self.delegated_grant.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -190,6 +192,7 @@ impl PolicyLocalContext {
             sandbox_name,
             denials: DenialLogSource::default(),
             token_grants: None,
+            delegated_grant: None,
             workspace_rx,
         }
     }
@@ -231,6 +234,27 @@ impl PolicyLocalContext {
     /// unavailable and must fail closed.
     pub(crate) fn token_grant_resolver(&self) -> Option<Arc<dyn TokenGrantResolver>> {
         self.token_grants.clone()
+    }
+
+    /// Hold this sandbox instance's delegated grant.
+    #[must_use]
+    pub fn with_delegated_grant(
+        mut self,
+        slot: Arc<crate::delegated_grant::DelegatedGrantSlot>,
+    ) -> Self {
+        self.delegated_grant = Some(slot);
+        self
+    }
+
+    /// Install the gateway's current delegated grant for this sandbox
+    /// instance. See [`crate::delegated_grant::DelegatedGrantSlot::install`].
+    pub fn install_delegated_grant(
+        &self,
+        config: Option<&openshell_core::proto::DelegatedCredentialGrant>,
+    ) {
+        if let Some(slot) = &self.delegated_grant {
+            slot.install(config);
+        }
     }
 
     pub async fn set_current_policy(&self, policy: ProtoSandboxPolicy) {
