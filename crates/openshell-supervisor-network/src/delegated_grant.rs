@@ -18,7 +18,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use openshell_core::host_pattern::HostSelector;
-use openshell_core::oauth::{self, OAuthTokenResponse, TokenGrantClient, TokenGrantParams};
+use openshell_core::oauth::{
+    self, ACCESS_TOKEN_TYPE, OAuthTokenResponse, TokenExchangeParams, TokenGrantClient,
+    TokenGrantParams,
+};
 use openshell_core::proto::{
     DelegatedCredentialGrant, DelegatedGrantAssertionSource, DelegatedGrantType,
 };
@@ -195,10 +198,30 @@ impl<F: AssertionFetcher> TokenEndpointResolver<F> {
         let client = grant.client.as_ref();
         let config = &grant.config;
         match (grant.grant_type, request.subject_token) {
-            (DelegatedGrantType::TokenExchange, _) | (_, Some(_)) => Err(TokenGrantFailure::new(
-                TokenGrantFailureKind::Configuration,
-                TokenGrantStage::Injection,
-            )),
+            (DelegatedGrantType::TokenExchange, Some(subject_token)) => {
+                oauth::post_oauth_token_exchange(
+                    client,
+                    &config.token_endpoint,
+                    &TokenExchangeParams {
+                        client_assertion: assertion,
+                        client_assertion_type: &config.client_assertion_type,
+                        subject_token,
+                        subject_token_type: &config.subject_token_type,
+                        audience: "",
+                        resource: request.resource,
+                        scopes: &config.scopes,
+                        requested_token_type: ACCESS_TOKEN_TYPE,
+                    },
+                    Some(request.request_id),
+                )
+                .await
+            }
+            (DelegatedGrantType::TokenExchange, None) | (_, Some(_)) => {
+                Err(TokenGrantFailure::new(
+                    TokenGrantFailureKind::Configuration,
+                    TokenGrantStage::Injection,
+                ))
+            }
             (_, None) => {
                 oauth::post_oauth_token_grant(
                     client,
@@ -505,6 +528,98 @@ mod tests {
                 expected("https://api.github.com")
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn token_exchange_sends_the_user_token_as_subject_on_every_request() {
+        let (endpoint, server) = token_endpoint(vec![
+            (
+                "200 OK",
+                r#"{"access_token":"alice-github-1","expires_in":600}"#,
+            ),
+            (
+                "200 OK",
+                r#"{"access_token":"bob-github","expires_in":600}"#,
+            ),
+            (
+                "200 OK",
+                r#"{"access_token":"alice-github-2","expires_in":600}"#,
+            ),
+        ])
+        .await;
+        let grant = DelegatedGrant::from_proto(DelegatedCredentialGrant {
+            grant_type: DelegatedGrantType::TokenExchange.into(),
+            scopes: vec![],
+            ..grant_config(&endpoint)
+        })
+        .unwrap();
+        let resolver = TokenEndpointResolver::new(FixedAssertion {
+            fetches: AtomicUsize::new(0),
+        });
+        let mut tokens = Vec::new();
+        for subject in ["alice-token", "bob-token", "alice-token"] {
+            tokens.push(
+                resolver
+                    .obtain(&grant, request("https://api.github.com", Some(subject)))
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_eq!(tokens, ["alice-github-1", "bob-github", "alice-github-2"]);
+
+        let forms = server.await.unwrap();
+        let expected = |subject: &str| {
+            vec![
+                "client_assertion=workload-assertion".to_string(),
+                format!(
+                    "client_assertion_type={}",
+                    oauth::DEFAULT_CLIENT_ASSERTION_TYPE
+                ),
+                "grant_type=urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
+                format!("requested_token_type={ACCESS_TOKEN_TYPE}"),
+                "resource=https://api.github.com".to_string(),
+                format!("subject_token={subject}"),
+                format!("subject_token_type={ACCESS_TOKEN_TYPE}"),
+            ]
+        };
+        assert_eq!(
+            forms.iter().map(sorted_fields).collect::<Vec<_>>(),
+            [
+                expected("alice-token"),
+                expected("bob-token"),
+                expected("alice-token")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn subject_token_must_match_the_grant_type() {
+        let client_credentials =
+            DelegatedGrant::from_proto(grant_config("https://as.example.com/token")).unwrap();
+        let token_exchange = DelegatedGrant::from_proto(DelegatedCredentialGrant {
+            grant_type: DelegatedGrantType::TokenExchange.into(),
+            ..grant_config("https://as.example.com/token")
+        })
+        .unwrap();
+        let resolver = TokenEndpointResolver::new(FixedAssertion {
+            fetches: AtomicUsize::new(0),
+        });
+        for (grant, subject) in [
+            (&client_credentials, Some("user-token")),
+            (&token_exchange, None),
+        ] {
+            let failure = resolver
+                .obtain(grant, request("https://api.github.com", subject))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                failure,
+                TokenGrantFailure::new(
+                    TokenGrantFailureKind::Configuration,
+                    TokenGrantStage::Injection
+                )
+            );
+        }
     }
 
     #[tokio::test]
