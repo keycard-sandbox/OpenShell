@@ -330,7 +330,7 @@ where
 /// Fetch a JWT-SVID from the SPIRE agent for token grant authentication.
 ///
 /// The JWT-SVID is used as the client assertion in the `OAuth2` grant request.
-async fn fetch_jwt_svid_from_socket(
+pub async fn fetch_jwt_svid_from_socket(
     socket_path: &std::path::Path,
     audience: &str,
 ) -> Result<String, TokenGrantFailure> {
@@ -458,7 +458,7 @@ fn derive_issuer_from_token_endpoint(token_endpoint: &str) -> String {
     token_endpoint.to_string()
 }
 
-fn effective_jwt_svid_audience(token_endpoint: &str, jwt_svid_audience: &str) -> String {
+pub fn effective_jwt_svid_audience(token_endpoint: &str, jwt_svid_audience: &str) -> String {
     if jwt_svid_audience.is_empty() {
         derive_issuer_from_token_endpoint(token_endpoint)
     } else {
