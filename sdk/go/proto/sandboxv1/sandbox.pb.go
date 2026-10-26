@@ -2522,6 +2522,10 @@ type DelegatedCredentialGrant struct {
 	// presents with DELEGATED_GRANT_ASSERTION_SOURCE_FILE. Required for that
 	// source and empty otherwise.
 	AssertionFile string `protobuf:"bytes,10,opt,name=assertion_file,json=assertionFile,proto3" json:"assertion_file,omitempty"`
+	// OAuth 2.0 client_id sent with the client assertion (RFC 7521 section
+	// 4.2). It names the authorization server's client record when the
+	// assertion's subject does not. Empty omits the parameter.
+	ClientId      string `protobuf:"bytes,11,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2622,6 +2626,13 @@ func (x *DelegatedCredentialGrant) GetSubjectTokenType() string {
 func (x *DelegatedCredentialGrant) GetAssertionFile() string {
 	if x != nil {
 		return x.AssertionFile
+	}
+	return ""
+}
+
+func (x *DelegatedCredentialGrant) GetClientId() string {
+	if x != nil {
+		return x.ClientId
 	}
 	return ""
 }
@@ -2937,7 +2948,7 @@ const file_sandbox_proto_rawDesc = "" +
 	"\x1adelegated_credential_grant\x18\x12 \x01(\v2..openshell.sandbox.v1.DelegatedCredentialGrantR\x18delegatedCredentialGrant\x1ac\n" +
 	"\rSettingsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12<\n" +
-	"\x05value\x18\x02 \x01(\v2&.openshell.sandbox.v1.EffectiveSettingR\x05value:\x028\x01\"\x84\x04\n" +
+	"\x05value\x18\x02 \x01(\v2&.openshell.sandbox.v1.EffectiveSettingR\x05value:\x028\x01\"\xa1\x04\n" +
 	"\x18DelegatedCredentialGrant\x12%\n" +
 	"\x0etoken_endpoint\x18\x01 \x01(\tR\rtokenEndpoint\x12^\n" +
 	"\x10assertion_source\x18\x02 \x01(\x0e23.openshell.sandbox.v1.DelegatedGrantAssertionSourceR\x0fassertionSource\x12-\n" +
@@ -2950,7 +2961,8 @@ const file_sandbox_proto_rawDesc = "" +
 	"\x06scopes\x18\b \x03(\tR\x06scopes\x12,\n" +
 	"\x12subject_token_type\x18\t \x01(\tR\x10subjectTokenType\x12%\n" +
 	"\x0eassertion_file\x18\n" +
-	" \x01(\tR\rassertionFile\"\xd2\x02\n" +
+	" \x01(\tR\rassertionFile\x12\x1b\n" +
+	"\tclient_id\x18\v \x01(\tR\bclientId\"\xd2\x02\n" +
 	"\x1bSupervisorMiddlewareService\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12#\n" +
 	"\rgrpc_endpoint\x18\x02 \x01(\tR\fgrpcEndpoint\x12*\n" +

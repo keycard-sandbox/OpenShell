@@ -169,6 +169,8 @@ async fn post_oauth_token_request(
 
 /// Client credentials grant form fields.
 pub struct TokenGrantParams<'a> {
+    /// RFC 7521 `client_id` sent with the assertion. Empty omits it.
+    pub client_id: &'a str,
     /// Secret JWT client assertion sent only to the configured endpoint.
     pub client_assertion: &'a str,
     pub client_assertion_type: &'a str,
@@ -190,11 +192,14 @@ pub async fn post_oauth_token_grant(
     request_id: Option<&str>,
 ) -> Result<OAuthTokenResponse, TokenGrantFailure> {
     let client_assertion_type = effective_client_assertion_type(params.client_assertion_type);
-    let form_params = vec![
+    let mut form_params = vec![
         ("grant_type", "client_credentials"),
         ("client_assertion_type", client_assertion_type),
         ("client_assertion", params.client_assertion),
     ];
+    if !params.client_id.is_empty() {
+        form_params.push(("client_id", params.client_id));
+    }
     post_oauth_token_request(
         client,
         token_endpoint,
@@ -209,6 +214,8 @@ pub async fn post_oauth_token_grant(
 
 /// RFC 8693 token-exchange form fields.
 pub struct TokenExchangeParams<'a> {
+    /// RFC 7521 `client_id` sent with the assertion. Empty omits it.
+    pub client_id: &'a str,
     /// Secret JWT client assertion sent only to the configured endpoint.
     pub client_assertion: &'a str,
     pub client_assertion_type: &'a str,
@@ -237,7 +244,7 @@ pub async fn post_oauth_token_exchange(
     let client_assertion_type = effective_client_assertion_type(params.client_assertion_type);
     let subject_token_type = effective_token_type(params.subject_token_type);
     let requested_token_type = effective_token_type(params.requested_token_type);
-    let form_params = vec![
+    let mut form_params = vec![
         ("grant_type", TOKEN_EXCHANGE_GRANT_TYPE),
         ("client_assertion_type", client_assertion_type),
         ("client_assertion", params.client_assertion),
@@ -245,6 +252,9 @@ pub async fn post_oauth_token_exchange(
         ("subject_token_type", subject_token_type),
         ("requested_token_type", requested_token_type),
     ];
+    if !params.client_id.is_empty() {
+        form_params.push(("client_id", params.client_id));
+    }
     post_oauth_token_request(
         client,
         token_endpoint,
@@ -667,6 +677,7 @@ mod tests {
 
     fn empty_grant_params() -> TokenGrantParams<'static> {
         TokenGrantParams {
+            client_id: "",
             client_assertion: "jwt-svid-token",
             client_assertion_type: "",
             audience: "",
@@ -827,6 +838,7 @@ mod tests {
             request.form.get("client_assertion").map(String::as_str),
             Some("jwt-svid-token")
         );
+        assert!(!request.form.contains_key("client_id"));
     }
 
     #[tokio::test]
@@ -897,6 +909,7 @@ mod tests {
             &client,
             &endpoint,
             &TokenExchangeParams {
+                client_id: "acr_public_id",
                 client_assertion: "jwt-svid-token",
                 client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe",
                 subject_token: "subject-access-token",
@@ -934,6 +947,10 @@ mod tests {
             Some("jwt-svid-token")
         );
         assert_eq!(
+            request.form.get("client_id").map(String::as_str),
+            Some("acr_public_id")
+        );
+        assert_eq!(
             request.form.get("subject_token").map(String::as_str),
             Some("subject-access-token")
         );
@@ -969,6 +986,7 @@ mod tests {
             &client,
             &endpoint,
             &TokenExchangeParams {
+                client_id: "",
                 client_assertion: "jwt-svid-token",
                 client_assertion_type: "",
                 subject_token: "subject-token",
@@ -1000,6 +1018,7 @@ mod tests {
             request.form.get("requested_token_type").map(String::as_str),
             Some(ACCESS_TOKEN_TYPE)
         );
+        assert!(!request.form.contains_key("client_id"));
         assert!(!request.form.contains_key("audience"));
         assert!(!request.form.contains_key("resource"));
         assert!(!request.form.contains_key("scope"));

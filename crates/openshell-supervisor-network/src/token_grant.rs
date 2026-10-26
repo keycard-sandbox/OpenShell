@@ -228,6 +228,7 @@ impl SandboxInstanceTokenGrants {
                             http_client,
                             request.token_endpoint,
                             &TokenExchangeParams {
+                                client_id: "",
                                 client_assertion: &jwt_svid,
                                 client_assertion_type: request.client_assertion_type,
                                 subject_token: &intermediate.access_token,
@@ -393,6 +394,7 @@ async fn perform_token_grant(
         http_client,
         token_endpoint,
         &TokenGrantParams {
+            client_id: "",
             client_assertion: jwt_svid,
             client_assertion_type,
             audience,

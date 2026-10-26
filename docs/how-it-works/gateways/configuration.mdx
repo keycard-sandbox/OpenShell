@@ -594,6 +594,7 @@ For each selected request, the supervisor requests a token with the request orig
 | `assertion_source` | Yes | `spiffe` presents the sandbox's JWT-SVID. `file` presents the JWT in `assertion_file`. |
 | `assertion_file` | For `file` | Absolute path, in the supervisor's file system, of a file that holds one JWT. Not allowed with `spiffe`. |
 | `assertion_audience` | No | `aud` of the JWT-SVID for `spiffe`. Omission derives it from `token_endpoint`. Not allowed with `file`. |
+| `client_id` | No | OAuth 2.0 `client_id` sent with `client_assertion`, as RFC 7521 allows. Set it when the authorization server looks up the client by ID instead of by the assertion's subject. Omission sends no `client_id`. |
 | `client_assertion_type` | No | OAuth 2.0 `client_assertion_type`. Defaults to `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`. |
 | `grant_type` | No | `client_credentials` (default): the workload acts as itself. `token_exchange`: RFC 8693 exchange of the user-delegated bearer token that the workload sends in `Authorization`, which becomes `subject_token`. |
 | `subject_token_type` | No | `subject_token_type` for `token_exchange`. Defaults to `urn:ietf:params:oauth:token-type:access_token`. |

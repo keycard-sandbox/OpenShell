@@ -77,6 +77,7 @@ The operator configures the grant once in `gateway.toml`:
 token_endpoint = "https://auth.example.com/oauth/token"
 assertion_source = "file"               # or "spiffe"
 assertion_file = "/var/run/secrets/openshell/assertion.jwt"
+client_id = "acr_example"               # optional
 grant_type = "token_exchange"           # or "client_credentials"
 include_hosts = ["api.github.com", "**.example.com"]
 exclude_hosts = ["status.example.com"]
@@ -119,7 +120,11 @@ For a request whose host matches the grant:
 
 - The resource is the origin. The default port is omitted:
   `https://api.github.com`, `https://api.example.com:8443`.
-- The workload assertion is always `client_assertion`.
+- The workload assertion is always `client_assertion`. When `client_id` is
+  set, it goes with the assertion, as RFC 7521 section 4.2 allows. It names
+  the authorization server's client record when the assertion's subject is a
+  platform subject, such as a Kubernetes service account, that does not name
+  the client.
 - `client_credentials` sends nothing else: the sandbox acts as itself.
 - `token_exchange` sends the agent's bearer token from `Authorization` as
   `subject_token`, typed by `subject_token_type`, which defaults to

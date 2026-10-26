@@ -517,6 +517,10 @@ message DelegatedCredentialGrant {
   // presents with DELEGATED_GRANT_ASSERTION_SOURCE_FILE. Required for that
   // source and empty otherwise.
   string assertion_file = 10;
+  // OAuth 2.0 client_id sent with the client assertion (RFC 7521 section
+  // 4.2). It names the authorization server's client record when the
+  // assertion's subject does not. Empty omits the parameter.
+  string client_id = 11;
 }
 
 // Workload identity presented to a delegated grant's authorization server.

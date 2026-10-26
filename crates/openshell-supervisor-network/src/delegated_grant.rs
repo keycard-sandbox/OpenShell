@@ -75,6 +75,9 @@ impl DelegatedGrant {
             }
             _ => {}
         }
+        if config.client_id.chars().any(char::is_whitespace) {
+            return Err("client_id must not contain whitespace");
+        }
         let grant_type = match config.grant_type() {
             DelegatedGrantType::Unspecified => DelegatedGrantType::ClientCredentials,
             grant_type => grant_type,
@@ -263,6 +266,7 @@ impl<F: AssertionFetcher> TokenEndpointResolver<F> {
                     client,
                     &config.token_endpoint,
                     &TokenExchangeParams {
+                        client_id: &config.client_id,
                         client_assertion: assertion,
                         client_assertion_type: &config.client_assertion_type,
                         subject_token,
@@ -287,6 +291,7 @@ impl<F: AssertionFetcher> TokenEndpointResolver<F> {
                     client,
                     &config.token_endpoint,
                     &TokenGrantParams {
+                        client_id: &config.client_id,
                         client_assertion: assertion,
                         client_assertion_type: &config.client_assertion_type,
                         audience: "",
@@ -502,7 +507,7 @@ mod tests {
     #[test]
     fn from_proto_validates_the_grant() {
         let valid = grant_config("https://as.example.com/token");
-        let cases: [(&str, DelegatedCredentialGrant, Option<&str>); 11] = [
+        let cases: [(&str, DelegatedCredentialGrant, Option<&str>); 12] = [
             ("valid", valid.clone(), None),
             (
                 "plain http endpoint",
@@ -562,6 +567,14 @@ mod tests {
                     ..valid.clone()
                 },
                 Some("assertion_file requires the file assertion source"),
+            ),
+            (
+                "client id with whitespace",
+                DelegatedCredentialGrant {
+                    client_id: "acr public".into(),
+                    ..valid.clone()
+                },
+                Some("client_id must not contain whitespace"),
             ),
             (
                 "subject token type without token exchange",
@@ -924,6 +937,7 @@ mod tests {
         let grant = DelegatedGrant::from_proto(DelegatedCredentialGrant {
             grant_type: DelegatedGrantType::TokenExchange.into(),
             scopes: vec![],
+            client_id: "acr_public_id".into(),
             ..grant_config(&endpoint)
         })
         .unwrap();
@@ -949,6 +963,7 @@ mod tests {
                     "client_assertion_type={}",
                     oauth::DEFAULT_CLIENT_ASSERTION_TYPE
                 ),
+                "client_id=acr_public_id".to_string(),
                 "grant_type=urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
                 format!("requested_token_type={ACCESS_TOKEN_TYPE}"),
                 "resource=https://api.github.com".to_string(),

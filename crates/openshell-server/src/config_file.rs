@@ -460,6 +460,11 @@ pub struct DelegatedGrantFileConfig {
     /// Required with `assertion_source = "file"`; refused otherwise.
     #[serde(default)]
     pub assertion_file: Option<PathBuf>,
+    /// OAuth 2.0 `client_id` sent with the client assertion. Omission sends
+    /// none, and the authorization server identifies the client from the
+    /// assertion.
+    #[serde(default)]
+    pub client_id: Option<String>,
     /// OAuth 2.0 `client_assertion_type`. Omission uses RFC 7523 jwt-bearer.
     #[serde(default)]
     pub client_assertion_type: Option<String>,
@@ -519,6 +524,16 @@ impl DelegatedGrantFileConfig {
                     "must list at least one valid host pattern, and exclude_hosts must be valid host patterns",
                 )
             })?;
+        if self
+            .client_id
+            .as_deref()
+            .is_some_and(|id| id.is_empty() || id.chars().any(char::is_whitespace))
+        {
+            return Err(invalid(
+                "openshell.supervisor.delegated_grant.client_id",
+                "must not be empty or contain whitespace",
+            ));
+        }
         if self.subject_token_type.is_some()
             && self.grant_type != DelegatedGrantTypeFile::TokenExchange
         {
@@ -583,6 +598,7 @@ impl DelegatedGrantFileConfig {
             scopes: self.scopes.clone(),
             subject_token_type: self.subject_token_type.clone().unwrap_or_default(),
             assertion_file,
+            client_id: self.client_id.clone().unwrap_or_default(),
         })
     }
 }
@@ -1640,6 +1656,7 @@ timeout = "2s"
 token_endpoint = "https://zone.example.com/oauth/token"
 assertion_source = "file"
 assertion_file = "/var/run/openshell/assertion.jwt"
+client_id = "acr_public_id"
 grant_type = "token_exchange"
 subject_token_type = "urn:ietf:params:oauth:token-type:jwt"
 include_hosts = ["api.github.com", "*.example.org"]
@@ -1668,6 +1685,7 @@ scopes = ["read"]
                 scopes: vec!["read".into()],
                 subject_token_type: "urn:ietf:params:oauth:token-type:jwt".into(),
                 assertion_file: "/var/run/openshell/assertion.jwt".into(),
+                client_id: "acr_public_id".into(),
             }
         );
     }
@@ -1678,6 +1696,7 @@ scopes = ["read"]
             assertion_source: DelegatedGrantAssertionSourceFile::Spiffe,
             assertion_audience: None,
             assertion_file: None,
+            client_id: None,
             client_assertion_type: None,
             grant_type: DelegatedGrantTypeFile::ClientCredentials,
             subject_token_type: None,
@@ -1721,6 +1740,30 @@ scopes = ["read"]
                     ..spiffe.clone()
                 },
                 Some("openshell.supervisor.delegated_grant.include_hosts"),
+            ),
+            (
+                "client id",
+                DelegatedGrantFileConfig {
+                    client_id: Some("acr_public_id".into()),
+                    ..spiffe.clone()
+                },
+                None,
+            ),
+            (
+                "empty client id",
+                DelegatedGrantFileConfig {
+                    client_id: Some(String::new()),
+                    ..spiffe.clone()
+                },
+                Some("openshell.supervisor.delegated_grant.client_id"),
+            ),
+            (
+                "client id with whitespace",
+                DelegatedGrantFileConfig {
+                    client_id: Some("acr public".into()),
+                    ..spiffe.clone()
+                },
+                Some("openshell.supervisor.delegated_grant.client_id"),
             ),
             (
                 "subject token type without token exchange",
