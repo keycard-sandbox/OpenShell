@@ -4,6 +4,8 @@
 //! Endpoint-bound dynamic token grant injection for HTTP relay paths.
 
 #[cfg(test)]
+mod delegated;
+#[cfg(test)]
 mod multiple_grants;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -98,6 +100,7 @@ impl TokenGrantResolver for SpiffeTokenGrantResolver {
 pub struct TokenGrantInjectionError {
     failure: TokenGrantFailure,
     credential: Option<String>,
+    delegated: bool,
 }
 
 impl TokenGrantInjectionError {
@@ -105,6 +108,7 @@ impl TokenGrantInjectionError {
         Self {
             failure,
             credential: None,
+            delegated: false,
         }
     }
 
@@ -112,7 +116,29 @@ impl TokenGrantInjectionError {
         Self {
             failure,
             credential: credential_identity(binding_key).map(str::to_string),
+            delegated: false,
         }
+    }
+
+    fn for_delegated(failure: TokenGrantFailure) -> Self {
+        Self {
+            failure,
+            credential: None,
+            delegated: true,
+        }
+    }
+
+    /// Whether the delegated grant refused the request on policy: the
+    /// authorization server denied it, the user has not authorized the
+    /// resource, or the request cannot present what the grant requires.
+    /// Callers answer a denial with 403 and any other refusal with 502.
+    pub fn is_denial(&self) -> bool {
+        self.delegated
+            && matches!(
+                self.failure.kind(),
+                TokenGrantFailureKind::AccessDenied
+                    | TokenGrantFailureKind::ProviderAuthorizationRequired
+            )
     }
 
     /// Return the bounded classification for trusted status reporting.
@@ -162,6 +188,15 @@ pub fn pin_live_credentials(ctx: &mut L7EvalContext) -> Option<Arc<ProviderCrede
     ctx.provider_credential_revision = Some(snapshot.revision);
     ctx.provider_credential_installation_id = Some(snapshot.installation_id.clone());
     Some(snapshot)
+}
+
+/// Inject only the delegated grant, for a request without provider credentials.
+pub async fn inject_delegated(
+    req: L7Request,
+    ctx: &L7EvalContext,
+    request_id: &str,
+) -> Result<L7Request, TokenGrantInjectionError> {
+    inject_or_report(req, ctx, Ok(Vec::new()), request_id, None).await
 }
 
 /// Inject the grants whose endpoint selectors match the request.
@@ -251,7 +286,12 @@ async fn inject_or_report(
     request_id: &str,
     observation_context: Option<&EndpointObservationContext>,
 ) -> Result<L7Request, TokenGrantInjectionError> {
-    if selected.as_ref().is_ok_and(Vec::is_empty) {
+    let delegated = ctx
+        .delegated_grant
+        .as_ref()
+        .and_then(|slot| slot.current())
+        .filter(|state| state.governs(&ctx.host));
+    if selected.as_ref().is_ok_and(Vec::is_empty) && delegated.is_none() {
         // Most requests need no grant; keep that path free of allocation.
         return Ok(req);
     }
@@ -274,9 +314,27 @@ async fn inject_or_report(
     } else {
         Vec::new()
     };
-    let result = match selected {
-        Ok(credentials) => inject_selected(req, ctx, credentials, request_id).await,
-        Err(error) => Err(error),
+    let result = match (selected, delegated) {
+        (Ok(credentials), None) => inject_selected(req, ctx, credentials, request_id, None).await,
+        (Ok(credentials), Some(state)) => {
+            match acquire_delegated(&req, ctx, &state, request_id).await {
+                Ok(header) => {
+                    // The delegated grant owns `Authorization` on its hosts. A
+                    // provider grant for the same header would let an attached
+                    // provider override the authorization server's decision.
+                    let credentials = credentials
+                        .into_iter()
+                        .filter(|(_, credential)| {
+                            !token_grant_header_name(credential)
+                                .is_ok_and(|name| name.eq_ignore_ascii_case(AUTHORIZATION))
+                        })
+                        .collect();
+                    inject_selected(req, ctx, credentials, request_id, Some(header)).await
+                }
+                Err(error) => Err(error),
+            }
+        }
+        (Err(error), _) => Err(error),
     };
     if let Err(error) = &result {
         report_refused_grant(ctx, &method, &request_path, request_id, error);
@@ -323,6 +381,10 @@ fn report_refused_grant(
     request_id: &str,
     error: &TokenGrantInjectionError,
 ) {
+    if error.delegated {
+        report_refused_delegated_grant(ctx, method, request_path, request_id, error);
+        return;
+    }
     let credential = error
         .credential
         .as_deref()
@@ -358,27 +420,155 @@ fn report_refused_grant(
     );
 }
 
+/// Record a refused delegated grant.
+///
+/// A denial uses activity `Other` and any other failure uses `Fail`. Both are
+/// Medium and Blocked. The message names only the destination; the request ID
+/// is a separate field.
+fn report_refused_delegated_grant(
+    ctx: &L7EvalContext,
+    method: &str,
+    request_path: &str,
+    request_id: &str,
+    error: &TokenGrantInjectionError,
+) {
+    let failure = error.failure();
+    warn!(
+        host = %ctx.host,
+        port = ctx.port,
+        request_id = %request_id,
+        code = failure.code(),
+        stage = failure.stage().code(),
+        upstream_http_status = %failure
+            .upstream_status()
+            .map_or_else(|| "none".to_string(), |status| status.to_string()),
+        "Delegated grant refused"
+    );
+    let (activity, verb) = if error.is_denial() {
+        (ActivityId::Other, "denied")
+    } else {
+        (ActivityId::Fail, "failed")
+    };
+    ocsf_emit!(
+        HttpActivityBuilder::new(ocsf_ctx())
+            .activity(activity)
+            .action(ActionId::Denied)
+            .disposition(DispositionId::Blocked)
+            .severity(SeverityId::Medium)
+            .status(StatusId::Failure)
+            .http_request(HttpRequest::new(method, ctx.ocsf_url(request_path),))
+            .dst_endpoint(Endpoint::from_domain(&ctx.host, ctx.port))
+            .message(format!(
+                "Delegated grant {verb} for {}:{}",
+                ctx.host, ctx.port
+            ))
+            .unmapped("request_id", request_id)
+            .build()
+    );
+}
+
+/// Obtain the delegated grant's token for this request's origin.
+///
+/// A delegated grant never sends a token over plaintext. A plaintext request to
+/// a selected host is denied without contacting the authorization server, and
+/// so is a token exchange request without exactly one bearer token.
+async fn acquire_delegated(
+    req: &L7Request,
+    ctx: &L7EvalContext,
+    state: &crate::delegated_grant::DelegatedGrantState,
+    request_id: &str,
+) -> Result<(String, String), TokenGrantInjectionError> {
+    let refuse =
+        |kind, stage| TokenGrantInjectionError::for_delegated(TokenGrantFailure::new(kind, stage));
+    let crate::delegated_grant::DelegatedGrantState::Active(binding) = state else {
+        return Err(refuse(
+            TokenGrantFailureKind::Configuration,
+            TokenGrantStage::Configuration,
+        ));
+    };
+    let scheme = ctx.request_scheme();
+    if scheme != "https" {
+        return Err(refuse(
+            TokenGrantFailureKind::AccessDenied,
+            TokenGrantStage::Injection,
+        ));
+    }
+    let subject_token = if binding.grant.requires_subject_token() {
+        let Some(token) = workload_bearer_token(&req.raw_header) else {
+            return Err(refuse(
+                TokenGrantFailureKind::ProviderAuthorizationRequired,
+                TokenGrantStage::Injection,
+            ));
+        };
+        Some(token)
+    } else {
+        None
+    };
+    let resource = crate::delegated_grant::resource_for(scheme, &ctx.host, ctx.port);
+    let token = binding
+        .resolver
+        .obtain(
+            &binding.grant,
+            crate::delegated_grant::DelegatedTokenRequest {
+                resource: &resource,
+                subject_token,
+                request_id,
+            },
+        )
+        .await
+        .map_err(TokenGrantInjectionError::for_delegated)?;
+    crate::token_grant::validate_access_token(&token).map_err(|failure| {
+        TokenGrantInjectionError::for_delegated(failure.at_stage(TokenGrantStage::Injection))
+    })?;
+    Ok((AUTHORIZATION.to_string(), format!("Bearer {token}")))
+}
+
+/// The workload's bearer token: the value of its only `Authorization` header,
+/// with the `Bearer` scheme and a token68 credential. Anything else is `None`.
+fn workload_bearer_token(raw_header: &[u8]) -> Option<&str> {
+    let (header_block, _) = parse_header_block(raw_header).ok()?;
+    let mut values = header_block.split("\r\n").skip(1).filter_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case(AUTHORIZATION)
+            .then_some(value.trim())
+    });
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    let (scheme, token) = value.split_once(' ')?;
+    let token = token.trim();
+    (scheme.eq_ignore_ascii_case("bearer")
+        && crate::token_grant::validate_access_token(token).is_ok())
+    .then_some(token)
+}
+
+const AUTHORIZATION: &str = "Authorization";
+
 /// Acquires every selected grant and rewrites the request headers.
 ///
-/// Any failed acquisition returns an error before any header is written.
+/// `delegated` is an already acquired delegated grant header, written with the
+/// others. Any failed acquisition returns an error before any header is written.
 async fn inject_selected(
     req: L7Request,
     ctx: &L7EvalContext,
     credentials: Vec<(String, ProviderProfileCredential)>,
     request_id: &str,
+    delegated: Option<(String, String)>,
 ) -> Result<L7Request, TokenGrantInjectionError> {
-    let resolver = ctx
-        .token_grant_resolver
-        .as_ref()
-        .ok_or_else(|| TokenGrantInjectionError::new(injection_configuration_failure()))?;
     // A request that cannot carry a header never acquires a credential.
     parse_header_block(&req.raw_header).map_err(TokenGrantInjectionError::new)?;
 
     // Release the credential snapshot lock before acquisition. Keep all token values
     // local until every selected grant and header has been validated, so a later
     // failure cannot expose a partially authenticated request to a relay caller.
-    let mut headers = Vec::with_capacity(credentials.len());
+    let mut headers = Vec::with_capacity(credentials.len() + 1);
     for (provider_key, cred) in &credentials {
+        let resolver = ctx
+            .token_grant_resolver
+            .as_ref()
+            .ok_or_else(|| TokenGrantInjectionError::new(injection_configuration_failure()))?;
         let refused = |failure| TokenGrantInjectionError::for_binding(failure, provider_key);
         let token_grant = cred
             .token_grant
@@ -392,10 +582,31 @@ async fn inject_selected(
         headers.push(token_grant_header(cred, &access_token).map_err(refused)?);
     }
 
+    let delegated_injected = delegated.is_some();
+    headers.extend(delegated);
     let mut raw_header = req.raw_header;
     for (name, value) in headers {
         raw_header =
             inject_header(&raw_header, &name, &value).map_err(TokenGrantInjectionError::new)?;
+    }
+    if delegated_injected {
+        ocsf_emit!(
+            HttpActivityBuilder::new(ocsf_ctx())
+                .activity(ActivityId::Other)
+                .action(ActionId::Allowed)
+                .disposition(DispositionId::Allowed)
+                .severity(SeverityId::Informational)
+                .http_request(HttpRequest::new(
+                    &req.action,
+                    ctx.ocsf_url(request_path(&req.target)),
+                ))
+                .dst_endpoint(Endpoint::from_domain(&ctx.host, ctx.port))
+                .message(format!(
+                    "Delegated grant issued for {}:{}",
+                    ctx.host, ctx.port
+                ))
+                .build()
+        );
     }
     for (provider_key, _) in credentials {
         ocsf_emit!(
@@ -1069,7 +1280,7 @@ pub mod test_support {
             .and_then(EndpointObservationSender::capture);
         let mut pinned = ctx.clone();
         let Some(snapshot) = pin_live_credentials(&mut pinned) else {
-            return Ok(req);
+            return inject_delegated(req, ctx, request_id).await;
         };
         inject_for_selectors(
             req,

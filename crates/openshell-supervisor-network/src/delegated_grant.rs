@@ -305,6 +305,15 @@ impl DelegatedGrantSlot {
         }
     }
 
+    /// A slot holding `state`, for tests of the request path.
+    #[cfg(test)]
+    pub(crate) fn holding(state: DelegatedGrantState) -> Arc<Self> {
+        Arc::new(Self {
+            installed: RwLock::new(Some((DelegatedCredentialGrant::default(), Arc::new(state)))),
+            workload_api_socket: None,
+        })
+    }
+
     /// The installed grant, if any. A poisoned lock reads as rejected.
     #[must_use]
     pub fn current(&self) -> Option<Arc<DelegatedGrantState>> {

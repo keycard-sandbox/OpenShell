@@ -246,6 +246,13 @@ impl PolicyLocalContext {
         self
     }
 
+    /// The sandbox instance's delegated grant slot.
+    pub(crate) fn delegated_grant(
+        &self,
+    ) -> Option<Arc<crate::delegated_grant::DelegatedGrantSlot>> {
+        self.delegated_grant.clone()
+    }
+
     /// Install the gateway's current delegated grant for this sandbox
     /// instance. See [`crate::delegated_grant::DelegatedGrantSlot::install`].
     pub fn install_delegated_grant(

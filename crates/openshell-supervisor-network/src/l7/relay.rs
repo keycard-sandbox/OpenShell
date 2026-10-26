@@ -81,6 +81,8 @@ pub struct L7EvalContext {
     /// Dynamic token grant resolver for endpoint-bound credentials.
     pub(crate) token_grant_resolver:
         Option<Arc<dyn crate::l7::token_grant_injection::TokenGrantResolver>>,
+    /// Gateway-configured delegated grant, read on every request.
+    pub(crate) delegated_grant: Option<Arc<crate::delegated_grant::DelegatedGrantSlot>>,
     /// Shared feature state for agent-driven policy proposals.
     pub(crate) agent_proposals: openshell_core::proposals::AgentProposals,
     /// Bounded, nonblocking sink for privacy-safe tool server endpoint outcomes.
@@ -224,7 +226,7 @@ pub(crate) async fn prepare_inspected_request(
         )
         .await?
     } else {
-        req
+        crate::l7::token_grant_injection::inject_delegated(req, &scoped, request_id).await?
     };
     if engine.is_stale() {
         return Err(miette!("policy changed during token grant resolution"));
@@ -3668,7 +3670,10 @@ where
                 )
                 .await
             }
-            None => Ok(req),
+            None => {
+                crate::l7::token_grant_injection::inject_delegated(req, &grant_ctx, &request_id)
+                    .await
+            }
         };
         let Ok(req_with_auth) = injected else {
             // The refusal event names the credential and request ID.

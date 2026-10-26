@@ -1007,6 +1007,7 @@ impl TransparentTcpHandle {
         activity_tx: Option<ActivitySender>,
         upstream_proxy_args: &upstream_proxy::UpstreamProxyArgs,
         engine_ready: tokio::sync::watch::Receiver<bool>,
+        delegated_grant: Arc<crate::delegated_grant::DelegatedGrantSlot>,
     ) -> Result<Self> {
         let upstream_proxy = Arc::new(
             UpstreamProxyConfig::from_args(upstream_proxy_args)
@@ -1022,6 +1023,7 @@ impl TransparentTcpHandle {
             let denial_tx = denial_tx.clone();
             let activity_tx = activity_tx.clone();
             let upstream_proxy = upstream_proxy.clone();
+            let delegated_grant = delegated_grant.clone();
             let mut engine_ready = engine_ready.clone();
             joins.push(tokio::spawn(async move {
                 if tokio::time::timeout(
@@ -1048,6 +1050,7 @@ impl TransparentTcpHandle {
                     let denial_tx = denial_tx.clone();
                     let activity_tx = activity_tx.clone();
                     let upstream_proxy = upstream_proxy.clone();
+                    let delegated_grant = delegated_grant.clone();
                     tokio::spawn(async move {
                         if let Err(error) = handle_transparent_tcp_connection(
                             stream,
@@ -1059,6 +1062,7 @@ impl TransparentTcpHandle {
                             denial_tx,
                             activity_tx,
                             upstream_proxy,
+                            delegated_grant,
                         )
                         .await
                         {
@@ -1096,6 +1100,7 @@ async fn handle_transparent_tcp_connection(
     denial_tx: Option<mpsc::UnboundedSender<DenialEvent>>,
     activity_tx: Option<ActivitySender>,
     upstream_proxy: Arc<Option<UpstreamProxyConfig>>,
+    delegated_grant: Arc<crate::delegated_grant::DelegatedGrantSlot>,
 ) -> Result<()> {
     let workload_addr = client.peer_addr().into_diagnostic()?;
     let original = original_destination(&client).into_diagnostic()?;
@@ -1237,6 +1242,9 @@ async fn handle_transparent_tcp_connection(
             endpoint_observation: None,
         },
     );
+    // The transparent path has no PolicyLocalContext; the instance's grant
+    // slot is passed in directly.
+    ctx.delegated_grant = Some(delegated_grant);
     let middleware_gate = middleware_uninspectable_gate(&opa_engine, &ctx)?;
     if middleware_gate == crate::l7::middleware::UninspectableTrafficGate::Deny {
         crate::l7::middleware::emit_middleware_uninspectable(&ctx, "transparent tcp", true);
@@ -5307,7 +5315,11 @@ async fn inject_token_grant_for_forward_request(
     // L4-only forwarding keeps selector-based credentials; it has no inspected
     // endpoint owner decision. Inspected requests always use preparation above.
     let Some(snapshot) = crate::l7::token_grant_injection::pin_live_credentials(l7_ctx) else {
-        return Ok(request.raw_header);
+        return Ok(
+            crate::l7::token_grant_injection::inject_delegated(request, l7_ctx, request_id)
+                .await?
+                .raw_header,
+        );
     };
     Ok(crate::l7::token_grant_injection::inject_for_selectors(
         request,

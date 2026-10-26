@@ -98,6 +98,8 @@ pub(super) fn http_context(
         body_classifier: None,
         activity_tx: signals.activity,
         token_grant_resolver,
+        delegated_grant: policy_local
+            .and_then(crate::policy_local::PolicyLocalContext::delegated_grant),
         agent_proposals,
         workspace,
         endpoint_observation_tx: signals.endpoint_observation,
@@ -398,6 +400,7 @@ mod tests {
             body_classifier: None,
             activity_tx: None,
             token_grant_resolver: None,
+            delegated_grant: None,
             agent_proposals: openshell_core::proposals::AgentProposals::default(),
             workspace: String::new(),
             endpoint_observation_tx: None,

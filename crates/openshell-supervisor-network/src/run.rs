@@ -331,7 +331,7 @@ pub async fn run_networking(
         )
         .with_denial_log(denial_log)
         .with_token_grants(Arc::new(token_grants))
-        .with_delegated_grant(delegated_grant_slot),
+        .with_delegated_grant(delegated_grant_slot.clone()),
     );
 
     // Readiness signal for the proxy accept loop: the proxy binds the TCP
@@ -657,6 +657,7 @@ pub async fn run_networking(
             activity_tx,
             upstream_proxy_args,
             transparent_engine_ready_rx,
+            delegated_grant_slot,
         )?;
         (Some(dns), Some(transparent))
     } else {
