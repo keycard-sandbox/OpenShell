@@ -1100,6 +1100,11 @@ fn validate_preflight_semantics(
             ));
         }
     }
+    if let Some(delegated_grant) = file.openshell.supervisor.delegated_grant.as_ref() {
+        delegated_grant
+            .validate()
+            .map_err(|error| miette::miette!("delegated grant: {error}"))?;
+    }
     if args.name.trim().is_empty() {
         return Err(miette::miette!("gateway name must not be empty"));
     }
