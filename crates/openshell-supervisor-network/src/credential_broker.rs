@@ -8,7 +8,6 @@
 //! replace credentials, send the request on, or deny it with 403. The broker
 //! authenticates the call with the sandbox's extension token.
 
-use std::fmt::Write as _;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -20,7 +19,7 @@ use openshell_core::proto::SupervisorCredentialBroker;
 use openshell_core::proto::credential_broker::v1::credential_broker_client::CredentialBrokerClient;
 use openshell_core::proto::credential_broker::v1::{
     CredentialPlacement, DenyReason, HttpCredentialRequest, HttpCredentialResult,
-    credential_placement, http_credential_result,
+    http_credential_result,
 };
 use openshell_core::token_grant_failure::{
     TokenGrantFailure, TokenGrantFailureKind, TokenGrantStage,
@@ -36,6 +35,9 @@ use openshell_ocsf::{
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 use tonic::{Code, Status};
+
+pub use crate::l7::credential_placement::Placement;
+use crate::l7::credential_placement::{self, AuthStyle};
 
 /// Longest query parameter name a placement may target.
 const MAX_QUERY_PARAMETER_NAME_BYTES: usize = 256;
@@ -55,13 +57,6 @@ const PROTECTED_HEADERS: &[&str] = &[
     "transfer-encoding",
     "upgrade",
 ];
-
-/// One credential value and the request field it replaces.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Placement {
-    Header { name: String, value: String },
-    QueryParameter { name: String, value: String },
-}
 
 /// What the broker decided for a request it did not deny.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -273,74 +268,61 @@ fn validate_placements(
     }
     let mut validated: Vec<Placement> = Vec::with_capacity(placements.len());
     for placement in placements {
-        let value = placement.value;
-        if value.len() > MAX_PLACEMENT_VALUE_BYTES || value.chars().any(char::is_control) {
+        if placement.value.len() > MAX_PLACEMENT_VALUE_BYTES
+            || placement.value.chars().any(char::is_control)
+        {
             return Err(());
         }
-        let placement = match placement.target.ok_or(())? {
-            credential_placement::Target::Header(name) => {
+        let style = AuthStyle::parse(&placement.auth_style).ok_or(())?;
+        // A field the style does not use is invalid, so a broker mistake
+        // cannot silently land the credential somewhere else.
+        let unused_field = if style == AuthStyle::Query {
+            &placement.header_name
+        } else {
+            &placement.query_param
+        };
+        if !unused_field.is_empty() {
+            return Err(());
+        }
+        let placed = credential_placement::place(
+            style,
+            &placement.header_name,
+            &placement.query_param,
+            &placement.value,
+        )?;
+        match &placed {
+            Placement::Header { name, .. } => {
                 let lower = name.to_ascii_lowercase();
-                if !is_header_token(&name)
-                    || PROTECTED_HEADERS.contains(&lower.as_str())
+                if PROTECTED_HEADERS.contains(&lower.as_str())
                     || lower.starts_with("x-openshell-")
                     || connection_nominated.contains(&lower)
                 {
                     return Err(());
                 }
-                Placement::Header { name, value }
             }
-            credential_placement::Target::QueryParameter(name) => {
-                if name.is_empty()
-                    || name.len() > MAX_QUERY_PARAMETER_NAME_BYTES
-                    || name.chars().any(char::is_control)
+            Placement::QueryParameter { name, .. } => {
+                if name.len() > MAX_QUERY_PARAMETER_NAME_BYTES || name.chars().any(char::is_control)
                 {
                     return Err(());
                 }
-                Placement::QueryParameter { name, value }
             }
-        };
-        let duplicate = validated
-            .iter()
-            .any(|existing| match (existing, &placement) {
-                (Placement::Header { name: a, .. }, Placement::Header { name: b, .. }) => {
-                    a.eq_ignore_ascii_case(b)
-                }
-                (
-                    Placement::QueryParameter { name: a, .. },
-                    Placement::QueryParameter { name: b, .. },
-                ) => a == b,
-                _ => false,
-            });
+        }
+        let duplicate = validated.iter().any(|existing| match (existing, &placed) {
+            (Placement::Header { name: a, .. }, Placement::Header { name: b, .. }) => {
+                a.eq_ignore_ascii_case(b)
+            }
+            (
+                Placement::QueryParameter { name: a, .. },
+                Placement::QueryParameter { name: b, .. },
+            ) => a == b,
+            _ => false,
+        });
         if duplicate {
             return Err(());
         }
-        validated.push(placement);
+        validated.push(placed);
     }
     Ok(validated)
-}
-
-fn is_header_token(name: &str) -> bool {
-    !name.is_empty()
-        && name.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'|'
-                        | b'~'
-                )
-        })
 }
 
 /// Header lines of a raw request header block, after the request line.
@@ -373,57 +355,6 @@ fn connection_nominated(raw_header: &[u8]) -> Vec<String> {
         .map(|token| token.trim().to_ascii_lowercase())
         .filter(|token| !token.is_empty())
         .collect()
-}
-
-/// Replace every `name` query parameter in the request line with one
-/// `name=value` pair. Returns the new raw header and request target.
-pub(crate) fn replace_query_parameter(
-    raw_header: &[u8],
-    name: &str,
-    value: &str,
-) -> Result<(Vec<u8>, String), ()> {
-    let line_end = raw_header
-        .windows(2)
-        .position(|window| window == b"\r\n")
-        .ok_or(())?;
-    let request_line = std::str::from_utf8(&raw_header[..line_end]).map_err(|_| ())?;
-    let mut parts = request_line.splitn(3, ' ');
-    let (method, target, version) = (
-        parts.next().ok_or(())?,
-        parts.next().ok_or(())?,
-        parts.next().ok_or(())?,
-    );
-    let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    let mut pairs = Vec::new();
-    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
-        let key = pair.split_once('=').map_or(pair, |(key, _)| key);
-        let decoded = crate::l7::rest::decode_query_component(key).map_err(|_| ())?;
-        if decoded != name {
-            pairs.push(pair.to_string());
-        }
-    }
-    pairs.push(format!(
-        "{}={}",
-        percent_encode_query_component(name),
-        percent_encode_query_component(value)
-    ));
-    let target = format!("{path}?{}", pairs.join("&"));
-    let mut rewritten = format!("{method} {target} {version}").into_bytes();
-    rewritten.extend_from_slice(&raw_header[line_end..]);
-    Ok((rewritten, target))
-}
-
-/// Percent-encode everything except RFC 3986 unreserved characters.
-fn percent_encode_query_component(input: &str) -> String {
-    let mut encoded = String::with_capacity(input.len());
-    for byte in input.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            encoded.push(char::from(byte));
-        } else {
-            let _ = write!(encoded, "%{byte:02X}");
-        }
-    }
-    encoded
 }
 
 fn normalized_host(host: &str) -> &str {
@@ -652,20 +583,30 @@ mod tests {
         }
     }
 
-    fn header(name: &str, value: &str) -> CredentialPlacement {
+    fn placement(
+        auth_style: &str,
+        header_name: &str,
+        query_param: &str,
+        value: &str,
+    ) -> CredentialPlacement {
         CredentialPlacement {
-            target: Some(credential_placement::Target::Header(name.to_string())),
+            auth_style: auth_style.to_string(),
+            header_name: header_name.to_string(),
+            query_param: query_param.to_string(),
             value: value.to_string(),
         }
     }
 
+    fn bearer(value: &str) -> CredentialPlacement {
+        placement("bearer", "", "", value)
+    }
+
+    fn header(name: &str, value: &str) -> CredentialPlacement {
+        placement("header", name, "", value)
+    }
+
     fn query(name: &str, value: &str) -> CredentialPlacement {
-        CredentialPlacement {
-            target: Some(credential_placement::Target::QueryParameter(
-                name.to_string(),
-            )),
-            value: value.to_string(),
-        }
+        placement("query", "", name, value)
     }
 
     fn grant(placements: Vec<CredentialPlacement>) -> HttpCredentialResult {
@@ -705,11 +646,8 @@ mod tests {
         });
         let cases: Vec<DecisionCase> = vec![
             (
-                "header and query grant",
-                Ok(grant(vec![
-                    header("Authorization", "Bearer t"),
-                    query("api_key", "k"),
-                ])),
+                "bearer and query grant",
+                Ok(grant(vec![bearer("t"), query("api_key", "k")])),
                 "https",
                 Ok(BrokerDecision::Grant(vec![
                     Placement::Header {
@@ -718,6 +656,24 @@ mod tests {
                     },
                     Placement::QueryParameter {
                         name: "api_key".into(),
+                        value: "k".into(),
+                    },
+                ])),
+            ),
+            (
+                "basic and custom header grant",
+                Ok(grant(vec![
+                    placement("basic", "", "", "user:pass"),
+                    header("X-Api-Key", "k"),
+                ])),
+                "https",
+                Ok(BrokerDecision::Grant(vec![
+                    Placement::Header {
+                        name: "Authorization".into(),
+                        value: "Basic dXNlcjpwYXNz".into(),
+                    },
+                    Placement::Header {
+                        name: "X-Api-Key".into(),
                         value: "k".into(),
                     },
                 ])),
@@ -731,7 +687,7 @@ mod tests {
             ),
             (
                 "grant over plaintext",
-                Ok(grant(vec![header("Authorization", "Bearer t")])),
+                Ok(grant(vec![bearer("t")])),
                 "http",
                 failed(Kind::Configuration),
             ),
@@ -821,8 +777,24 @@ mod tests {
         let cases: Vec<(&str, Vec<CredentialPlacement>)> = vec![
             ("empty grant", vec![]),
             ("more than eight placements", nine),
-            ("value too long", vec![header("Authorization", &long)]),
-            ("control character", vec![header("Authorization", "a\r\nb")]),
+            ("value too long", vec![bearer(&long)]),
+            ("control character", vec![bearer("a\r\nb")]),
+            ("unknown auth style", vec![placement("digest", "", "", "v")]),
+            ("path auth style", vec![placement("path", "", "", "v")]),
+            ("empty auth style", vec![placement("", "", "", "v")]),
+            (
+                "header without a name",
+                vec![placement("header", "", "", "v")],
+            ),
+            ("query without a name", vec![query("", "v")]),
+            (
+                "query with a header name",
+                vec![placement("query", "X-A", "k", "v")],
+            ),
+            (
+                "bearer with a query name",
+                vec![placement("bearer", "", "k", "v")],
+            ),
             ("invalid header name", vec![header("bad header", "v")]),
             ("routing header", vec![header("Host", "evil.example")]),
             (
@@ -837,17 +809,9 @@ mod tests {
             ("connection-nominated header", vec![header("X-Trace", "v")]),
             (
                 "duplicate header",
-                vec![header("Authorization", "a"), header("authorization", "b")],
+                vec![bearer("a"), header("authorization", "b")],
             ),
             ("duplicate query", vec![query("k", "a"), query("k", "b")]),
-            ("empty query name", vec![query("", "v")]),
-            (
-                "missing target",
-                vec![CredentialPlacement {
-                    target: None,
-                    value: "v".into(),
-                }],
-            ),
         ];
         for (name, placements) in cases {
             let (broker, _) = broker(Ok(grant(placements)), false);
@@ -887,35 +851,6 @@ mod tests {
                 "forward_authorization={forward}"
             );
         }
-    }
-
-    #[test]
-    fn query_parameter_replacement() {
-        let cases = [
-            (
-                "GET /v1/items HTTP/1.1\r\nHost: a\r\n\r\n",
-                "GET /v1/items?api_key=s%20k HTTP/1.1\r\nHost: a\r\n\r\n",
-            ),
-            (
-                "GET /v1/items?x=1&api_key=old&api%5Fkey=old2&y HTTP/1.1\r\n\r\n",
-                "GET /v1/items?x=1&y&api_key=s%20k HTTP/1.1\r\n\r\n",
-            ),
-            (
-                "GET https://a.example/v1?api_key=old HTTP/1.1\r\n\r\nbody",
-                "GET https://a.example/v1?api_key=s%20k HTTP/1.1\r\n\r\nbody",
-            ),
-        ];
-        for (input, expected) in cases {
-            let (rewritten, target) =
-                replace_query_parameter(input.as_bytes(), "api_key", "s k").unwrap();
-            assert_eq!(String::from_utf8(rewritten).unwrap(), expected, "{input}");
-            assert_eq!(
-                target,
-                expected.split(' ').nth(1).unwrap(),
-                "target of {input}"
-            );
-        }
-        assert!(replace_query_parameter(b"GET /v1?%zz=1 HTTP/1.1\r\n\r\n", "k", "v").is_err());
     }
 
     #[test]

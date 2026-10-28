@@ -10,7 +10,7 @@ use std::time::Duration;
 use openshell_core::host_pattern::HostSelector;
 use openshell_core::proto::credential_broker::v1::{
     CredentialDeny, CredentialGrant, CredentialPass, CredentialPlacement, DenyReason,
-    HttpCredentialRequest, HttpCredentialResult, credential_placement, http_credential_result,
+    HttpCredentialRequest, HttpCredentialResult, http_credential_result,
 };
 use tonic::Status;
 
@@ -69,16 +69,15 @@ fn grant_authorization_and_key() -> http_credential_result::Decision {
     http_credential_result::Decision::Grant(CredentialGrant {
         placements: vec![
             CredentialPlacement {
-                target: Some(credential_placement::Target::Header(
-                    "Authorization".to_string(),
-                )),
-                value: "Bearer broker-token".to_string(),
+                auth_style: "bearer".to_string(),
+                value: "broker-token".to_string(),
+                ..Default::default()
             },
             CredentialPlacement {
-                target: Some(credential_placement::Target::QueryParameter(
-                    "api_key".to_string(),
-                )),
+                auth_style: "query".to_string(),
+                query_param: "api_key".to_string(),
                 value: "broker key".to_string(),
+                ..Default::default()
             },
         ],
     })

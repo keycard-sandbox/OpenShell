@@ -28,7 +28,8 @@ use openshell_ocsf::{
 };
 use tracing::warn;
 
-use crate::credential_broker::{BrokerDecision, BrokerRequest, BrokerState, Placement};
+use crate::credential_broker::{BrokerDecision, BrokerRequest, BrokerState};
+use crate::l7::credential_placement::{self, AuthStyle, Placement};
 use crate::l7::provider::L7Request;
 use crate::l7::relay::L7EvalContext;
 
@@ -584,7 +585,7 @@ async fn inject_selected(
     let mut query_params = req.query_params;
     for (name, value) in query_parameters {
         (raw_header, target) =
-            crate::credential_broker::replace_query_parameter(&raw_header, &name, &value).map_err(
+            credential_placement::replace_query_parameter(&raw_header, &name, &value).map_err(
                 |()| {
                     TokenGrantInjectionError::for_broker(TokenGrantFailure::new(
                         TokenGrantFailureKind::Configuration,
@@ -822,70 +823,40 @@ fn inject_token_grant_header(
     inject_header(raw_header, &header_name, &header_value)
 }
 
+/// The profile auth style of a token grant. An empty style is bearer. Token
+/// grants write headers only.
+fn token_grant_style(
+    credential: &ProviderProfileCredential,
+) -> Result<AuthStyle, TokenGrantFailure> {
+    if credential.auth_style.trim().is_empty() {
+        return Ok(AuthStyle::Bearer);
+    }
+    match AuthStyle::parse(&credential.auth_style) {
+        Some(style @ (AuthStyle::Bearer | AuthStyle::Header)) => Ok(style),
+        _ => Err(injection_configuration_failure()),
+    }
+}
+
 fn token_grant_header(
     credential: &ProviderProfileCredential,
     access_token: &str,
 ) -> Result<(String, String), TokenGrantFailure> {
-    let header_name = token_grant_header_name(credential)?;
-    let header_value = if credential.auth_style.trim().eq_ignore_ascii_case("header") {
-        access_token.to_string()
-    } else {
-        format!("Bearer {access_token}")
-    };
-    Ok((header_name.to_string(), header_value))
+    match credential_placement::place(
+        token_grant_style(credential)?,
+        &credential.header_name,
+        "",
+        access_token,
+    ) {
+        Ok(Placement::Header { name, value }) => Ok((name, value)),
+        _ => Err(injection_configuration_failure()),
+    }
 }
 
 fn token_grant_header_name(
     credential: &ProviderProfileCredential,
 ) -> Result<&str, TokenGrantFailure> {
-    let header_name = match credential.auth_style.trim().to_ascii_lowercase().as_str() {
-        "" | "bearer" => {
-            if credential.header_name.trim().is_empty() {
-                "Authorization"
-            } else {
-                credential.header_name.trim()
-            }
-        }
-        // Header auth names its own header; there is no default to fall back to.
-        "header" if !credential.header_name.trim().is_empty() => credential.header_name.trim(),
-        _ => return Err(injection_configuration_failure()),
-    };
-    validate_header_name(header_name)?;
-    Ok(header_name)
-}
-
-fn validate_header_name(header_name: &str) -> Result<(), TokenGrantFailure> {
-    let valid = !header_name.is_empty()
-        && header_name.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'|'
-                        | b'~'
-                )
-        });
-    // A grant may not override HTTP framing or connection headers.
-    if !valid
-        || matches!(
-            header_name.to_ascii_lowercase().as_str(),
-            "host" | "content-length" | "transfer-encoding" | "connection"
-        )
-    {
-        return Err(injection_configuration_failure());
-    }
-    Ok(())
+    credential_placement::header_name(token_grant_style(credential)?, &credential.header_name)
+        .map_err(|()| injection_configuration_failure())
 }
 
 fn parse_header_block(raw_header: &[u8]) -> Result<(&str, usize), TokenGrantFailure> {
