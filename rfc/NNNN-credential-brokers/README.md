@@ -15,7 +15,8 @@ for each inspected HTTP request a sandbox sends to a selected host. The
 supervisor calls the broker at the credential injection step. The broker
 answers with one of three decisions:
 
-- `grant`: replace named headers or query parameters with broker-issued values.
+- `grant`: place broker-issued credentials in headers or query parameters,
+  described with the `auth_style` values of provider profiles.
 - `pass`: send the request without a broker credential. Provider credentials
   still apply.
 - `deny`: refuse the request with HTTP 403.
@@ -67,6 +68,8 @@ protocol to its credential source.
 - Per-sandbox or per-policy brokers. There is one broker per gateway, set by
   the operator.
 - Credentials for traffic OpenShell does not parse as HTTP.
+- Path placement. Request paths appear in access logs at every point that
+  terminates TLS between the supervisor and the upstream.
 - A protocol between OpenShell and any credential source.
 
 ## Proposal
@@ -173,12 +176,13 @@ message CredentialGrant {
   repeated CredentialPlacement placements = 1;
 }
 
+// Fields mean what they mean on a provider profile credential.
 message CredentialPlacement {
-  oneof target {
-    string header = 1;
-    string query_parameter = 2;
-  }
-  string value = 3;
+  // "bearer", "basic", "header", or "query".
+  string auth_style = 1;
+  string header_name = 2;
+  string query_param = 3;
+  string value = 4;
 }
 
 message CredentialPass {}
@@ -234,8 +238,8 @@ comes after network policy, L7 policy, and request middleware, and before
 provider token grants and static placeholder resolution. It covers inspected
 relays, TLS-terminated passthrough, and the forward proxy.
 
-- `grant`: each placement replaces every instance of its header or query
-  parameter. The supervisor skips provider token grants and placeholders for
+- `grant`: each placement replaces every instance of the header or query
+  parameter it writes. The supervisor skips provider token grants and placeholders for
   those targets, and applies provider credentials for other targets. A grant
   for an `http` request is a broker error. The supervisor never sends a broker
   credential in cleartext.
@@ -243,8 +247,19 @@ relays, TLS-terminated passthrough, and the forward proxy.
 - `deny`: the supervisor answers 403 with `x-openshell-request-id`, or a JSON
   403 on the forward proxy. It does not acquire provider credentials.
 
-The supervisor validates the result before it changes the request. Header names
-must be valid HTTP tokens. The supervisor rejects placements on routing,
+A placement uses the same `auth_style`, `header_name`, and `query_param` as a
+provider profile credential, and provider token grants and the broker write
+them with the same code:
+
+| `auth_style` | Written |
+|---|---|
+| `bearer` | `Bearer <value>` in `header_name`, default `Authorization` |
+| `basic` | `Basic <base64(value)>` in `header_name`, default `Authorization`. The value is `user:password`. |
+| `header` | The value in `header_name`, which is required |
+| `query` | The value in query parameter `query_param`, which is required |
+
+The supervisor validates the result before it changes the request. A field the
+style does not use must be empty. Header names must be valid HTTP tokens. The supervisor rejects placements on routing,
 framing, hop-by-hop, `Connection`-nominated, and `x-openshell-*` headers.
 Values must not contain control characters. A result has at most 8 placements
 of at most 8 KiB each, and names each target once. An invalid result is a
