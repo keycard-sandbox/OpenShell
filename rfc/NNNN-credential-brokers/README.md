@@ -95,15 +95,16 @@ forward_authorization = true
 | `name` | Diagnostic name. |
 | `grpc_endpoint` | `https://` endpoint reachable from every supervisor. `http://` requires `allow_insecure_transport = true`. |
 | `tls_ca_cert_path` | Optional private CA for the broker's certificate. |
-| `audience` | Extension token audience. Defaults to `urn:openshell:extension:credential-broker:<name>`. |
+| `audience` | Exact `aud` of the extension tokens OpenShell sends to the broker. Defaults to `urn:openshell:extension:credential-broker:<name>`. It does not limit which upstream resources the broker grants credentials for. |
 | `timeout` | Per-call deadline, 10 ms to 30 s. Defaults to `1s`. |
 | `include_hosts` | Required. Hosts whose requests go to the broker, in network policy host syntax. At most 32 patterns with `exclude_hosts`. |
 | `exclude_hosts` | Optional. Takes precedence over `include_hosts`. |
 | `forward_authorization` | Send the agent's `Authorization` header values to the broker. Defaults to `false`. |
 
 `openshell-gateway config preflight` validates the section. At startup the
-gateway also connects to the broker, calls `Describe`, and checks peer metadata
-and `expected_audience`, as it does for middleware. It refuses to start if the
+gateway also calls `Describe` to resolve compatibility, as it does for
+middleware. It checks the broker's protocol metadata, and checks that a
+non-empty `expected_audience` equals `audience`. It refuses to start if the
 broker is unavailable or incompatible. An authenticated registration requires
 gateway JWT signing material. Changing the section requires a gateway restart.
 
@@ -120,6 +121,12 @@ calling `sandbox_id`. The supervisor gets the token from `RefreshSandboxToken`,
 as it does for middleware services. The broker MUST authorize on the token's
 claims. Fields in the request message are for audit only.
 
+The token's `aud` is the registration's `audience`. It names the broker as the
+recipient of the token, so the broker can reject a token minted for another
+extension service. It does not limit which upstream resources the broker
+grants credentials for. The broker maps each request's host, port, and path to
+a credential, scope, or upstream audience itself.
+
 The supervisor does not need a SPIFFE socket, an assertion file, or any
 platform-specific identity. The broker decides how to identify the sandbox to
 its credential source.
@@ -130,7 +137,8 @@ its credential source.
 package openshell.credential_broker.v1;
 
 service CredentialBroker {
-  // Describe returns the broker manifest. The gateway calls it at startup.
+  // Describe resolves compatibility: protocol metadata and the extension
+  // token audience. The gateway calls it once at startup.
   rpc Describe(BrokerDescribeRequest) returns (BrokerManifest);
 
   // GrantHttpRequest decides the credential for one inspected HTTP request.
