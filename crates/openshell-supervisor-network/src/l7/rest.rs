@@ -660,7 +660,7 @@ pub(crate) fn parse_query_params(query: &str) -> Result<HashMap<String, Vec<Stri
 /// Decoding `+` as space matches the behavior of Python's `urllib.parse`,
 /// JavaScript's `URLSearchParams`, Go's `url.ParseQuery`, and most HTTP
 /// frameworks. Callers that need a literal `+` should send `%2B`.
-fn decode_query_component(input: &str) -> Result<String> {
+pub(crate) fn decode_query_component(input: &str) -> Result<String> {
     let bytes = input.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut i = 0;

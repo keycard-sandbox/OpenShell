@@ -692,7 +692,7 @@ pub async fn run_network_proxy(
     }
 
     let extension_credentials = openshell_extension_core::ExtensionCredentialStore::new();
-    let (mut policy, opa_engine, _, _, _, initial_agent_proposals_enabled, _, _) = load_policy(
+    let (mut policy, opa_engine, _, _, _, initial_agent_proposals_enabled, _, _, _) = load_policy(
         None,
         None,
         None,
@@ -1185,6 +1185,7 @@ pub async fn run_sandbox_instance(
         initial_agent_proposals_enabled,
         initial_extension_authentication_enabled,
         captured_provider_environment,
+        initial_credential_broker,
     ) = load_policy_with_gateway(
         sandbox_id.clone(),
         sandbox.clone(),
@@ -1430,6 +1431,8 @@ pub async fn run_sandbox_instance(
                 provider_workload_api_socket,
                 denial_log,
                 proxy_tls,
+                credential_broker: initial_credential_broker,
+                extension_credentials: extension_credentials.clone(),
             },
             denial_tx,
             activity_tx,
@@ -2750,6 +2753,7 @@ async fn load_policy(
     bool,
     bool,
     Option<CapturedProviderEnvironment>,
+    Option<openshell_core::proto::SupervisorCredentialBroker>,
 )> {
     load_policy_with_gateway(
         sandbox_id,
@@ -2792,6 +2796,7 @@ async fn load_policy_with_gateway(
     bool,
     bool,
     Option<CapturedProviderEnvironment>,
+    Option<openshell_core::proto::SupervisorCredentialBroker>,
 )> {
     use openshell_core::proto::ConfigurationAdmissionState;
     // File mode: load OPA engine from rego rules + YAML data (dev override)
@@ -2857,6 +2862,7 @@ async fn load_policy_with_gateway(
             LoadedPolicyOrigin::LocalOverride,
             false,
             false,
+            None,
             None,
         ));
     }
@@ -3217,6 +3223,34 @@ async fn load_policy_with_gateway(
                         .build()
                 );
             }
+            // Fetch the broker's token before the proxy serves a request. A
+            // failure leaves broker calls failing with 502 until the policy
+            // poll loop installs the token.
+            if snapshot.extension_authentication_enabled
+                && let Some(broker) = snapshot
+                    .credential_broker
+                    .as_ref()
+                    .filter(|broker| !broker.allow_insecure_transport)
+            {
+                let fetched =
+                    openshell_core::grpc_client::CachedOpenShellClient::connect_with_credentials(
+                        endpoint,
+                        extension_credentials.clone(),
+                    )
+                    .await;
+                let fetched = match fetched {
+                    Ok(client) => client
+                        .refresh_extension_credentials(&[
+                            openshell_core::credential_broker::credential_service(broker),
+                        ])
+                        .await
+                        .map(drop),
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = fetched {
+                    warn!(error = %error, "Startup credential broker token fetch failed");
+                }
+            }
             return Ok((
                 policy,
                 opa_engine,
@@ -3232,6 +3266,9 @@ async fn load_policy_with_gateway(
                     captured_provider_credentials,
                     &provider,
                 )),
+                // Installed before the proxy serves a request, so no request
+                // to a selected host leaves without the broker's decision.
+                snapshot.credential_broker,
             ));
         }
     }
@@ -4301,19 +4338,26 @@ fn next_poll_delay(
     store.next_refresh_delay(interval, now_ms)
 }
 
-/// Drop credentials for services no longer in the installed registry.
+/// Drop credentials for services no longer in the installed registry, and
+/// for a credential broker the gateway no longer configures.
 ///
 /// Call only after a registry swap succeeds, so a failed candidate cannot
 /// invalidate the last-known-good clients.
 fn retain_extension_credentials(
     store: &openshell_extension_core::ExtensionCredentialStore,
     installed: &[openshell_core::proto::SupervisorMiddlewareService],
+    credential_broker: Option<&openshell_core::proto::SupervisorCredentialBroker>,
     extension_authentication_enabled: bool,
 ) {
     let retained = if extension_authentication_enabled {
         installed
             .iter()
             .map(|service| service.name.as_str())
+            .chain(
+                credential_broker
+                    .filter(|broker| !broker.allow_insecure_transport)
+                    .map(|_| openshell_core::credential_broker::EXTENSION_CREDENTIAL_NAME),
+            )
             .collect()
     } else {
         std::collections::HashSet::default()
@@ -4326,6 +4370,7 @@ struct MiddlewareRegistryReconciliation<'a> {
     authentication: MiddlewareAuthentication,
     registry_changed: bool,
     extension_credentials: &'a openshell_extension_core::ExtensionCredentialStore,
+    credential_broker: Option<&'a openshell_core::proto::SupervisorCredentialBroker>,
     current_services: &'a mut Vec<openshell_core::proto::SupervisorMiddlewareService>,
     status: &'a mut MiddlewareRegistryStatus,
 }
@@ -4350,6 +4395,7 @@ async fn reconcile_middleware_registry(
             retain_extension_credentials(
                 reconciliation.extension_credentials,
                 reconciliation.desired_services,
+                reconciliation.credential_broker,
                 reconciliation.authentication.enabled,
             );
             reconciliation.current_services.clear();
@@ -4585,6 +4631,50 @@ fn emit_policy_validation_failure(
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retains_the_broker_credential_only_while_an_authenticated_broker_is_configured() {
+        use openshell_core::credential_broker::EXTENSION_CREDENTIAL_NAME;
+        let guard = openshell_core::proto::SupervisorMiddlewareService {
+            name: "guard".to_string(),
+            ..Default::default()
+        };
+        let broker = openshell_core::proto::SupervisorCredentialBroker {
+            name: "corp-broker".to_string(),
+            ..Default::default()
+        };
+        let insecure = openshell_core::proto::SupervisorCredentialBroker {
+            allow_insecure_transport: true,
+            ..broker.clone()
+        };
+        let cases = [
+            ("broker configured", Some(&broker), true, true),
+            ("broker removed", None, true, false),
+            (
+                "broker opts out of authentication",
+                Some(&insecure),
+                true,
+                false,
+            ),
+            ("authentication disabled", Some(&broker), false, false),
+        ];
+        for (name, configured, enabled, retained) in cases {
+            let store = openshell_extension_core::ExtensionCredentialStore::new();
+            let now_ms = openshell_core::time::now_ms();
+            for key in ["guard", EXTENSION_CREDENTIAL_NAME] {
+                store
+                    .install(key, "token", now_ms + 3_600_000, now_ms)
+                    .expect("install extension credential");
+            }
+            retain_extension_credentials(&store, std::slice::from_ref(&guard), configured, enabled);
+            assert_eq!(
+                store.get(EXTENSION_CREDENTIAL_NAME).is_some(),
+                retained,
+                "{name}"
+            );
+            assert_eq!(store.get("guard").is_some(), enabled, "{name}");
+        }
+    }
 
     pub fn test_gateway() -> openshell_core::grpc_client::GatewayEndpoint {
         openshell_core::grpc_client::GatewayEndpoint::new(
@@ -6788,8 +6878,10 @@ network_policies:
             proposals,
             extension_authentication_enabled,
             provider_credentials,
+            credential_broker,
         ) = startup().await.expect("load valid local policy");
         assert!(provider_credentials.is_none());
+        assert!(credential_broker.is_none());
         assert!(proto.is_none());
         assert!(matches!(origin, LoadedPolicyOrigin::LocalOverride));
         assert!(matches!(registry, MiddlewareRegistryStatus::Synchronized));

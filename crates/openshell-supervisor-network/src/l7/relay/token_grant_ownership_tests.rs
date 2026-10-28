@@ -292,6 +292,7 @@ impl Fixture {
             binary_path: "/usr/bin/curl".into(),
             provider_credentials: Some(self.state.clone()),
             token_grant_resolver: Some(resolver),
+            credential_broker: None,
             endpoint_observation_tx: self.observation.clone(),
             ..Default::default()
         };

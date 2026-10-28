@@ -663,14 +663,14 @@ fn main() -> Result<()> {
                         "network-proxy role started without validated policy files"
                     ));
                 };
-                openshell_supervisor::run_network_proxy(
+                Box::pin(openshell_supervisor::run_network_proxy(
                     listen,
                     policy_rules,
                     policy_data,
                     args.tls_dir,
                     upstream_proxy_args,
                     args.additional_ca_bundle,
-                )
+                ))
                 .await
             }
         }

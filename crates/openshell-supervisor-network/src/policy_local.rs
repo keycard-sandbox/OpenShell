@@ -160,6 +160,7 @@ pub struct PolicyLocalContext {
     sandbox_name: Option<String>,
     denials: DenialLogSource,
     token_grants: Option<Arc<dyn TokenGrantResolver>>,
+    credential_broker: Option<Arc<crate::credential_broker::CredentialBrokerSlot>>,
     workspace_rx: tokio::sync::watch::Receiver<String>,
 }
 
@@ -171,6 +172,7 @@ impl std::fmt::Debug for PolicyLocalContext {
             .field("sandbox_name", &self.sandbox_name)
             .field("denials", &self.denials)
             .field("token_grants", &self.token_grants.is_some())
+            .field("credential_broker", &self.credential_broker.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -190,6 +192,7 @@ impl PolicyLocalContext {
             sandbox_name,
             denials: DenialLogSource::default(),
             token_grants: None,
+            credential_broker: None,
             workspace_rx,
         }
     }
@@ -231,6 +234,34 @@ impl PolicyLocalContext {
     /// unavailable and must fail closed.
     pub(crate) fn token_grant_resolver(&self) -> Option<Arc<dyn TokenGrantResolver>> {
         self.token_grants.clone()
+    }
+
+    /// Hold this sandbox instance's credential broker.
+    #[must_use]
+    pub fn with_credential_broker(
+        mut self,
+        slot: Arc<crate::credential_broker::CredentialBrokerSlot>,
+    ) -> Self {
+        self.credential_broker = Some(slot);
+        self
+    }
+
+    /// The sandbox instance's credential broker slot.
+    pub(crate) fn credential_broker(
+        &self,
+    ) -> Option<Arc<crate::credential_broker::CredentialBrokerSlot>> {
+        self.credential_broker.clone()
+    }
+
+    /// Install the gateway's current broker registration for this sandbox
+    /// instance. See [`crate::credential_broker::CredentialBrokerSlot::install`].
+    pub fn install_credential_broker(
+        &self,
+        registration: Option<&openshell_core::proto::SupervisorCredentialBroker>,
+    ) {
+        if let Some(slot) = &self.credential_broker {
+            slot.install(registration);
+        }
     }
 
     pub async fn set_current_policy(&self, policy: ProtoSandboxPolicy) {

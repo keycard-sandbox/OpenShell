@@ -10,6 +10,7 @@
 //! owned by the orchestrator; this crate produces denials but does not
 //! aggregate them.
 
+pub mod credential_broker;
 mod google_cloud_metadata;
 #[cfg(target_os = "windows")]
 pub mod host;

@@ -4,6 +4,8 @@
 //! Endpoint-bound dynamic token grant injection for HTTP relay paths.
 
 #[cfg(test)]
+mod brokered;
+#[cfg(test)]
 mod multiple_grants;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -26,6 +28,7 @@ use openshell_ocsf::{
 };
 use tracing::warn;
 
+use crate::credential_broker::{BrokerDecision, BrokerRequest, BrokerState, Placement};
 use crate::l7::provider::L7Request;
 use crate::l7::relay::L7EvalContext;
 
@@ -98,6 +101,8 @@ impl TokenGrantResolver for SpiffeTokenGrantResolver {
 pub struct TokenGrantInjectionError {
     failure: TokenGrantFailure,
     credential: Option<String>,
+    /// The credential broker refused or failed the request.
+    brokered: bool,
 }
 
 impl TokenGrantInjectionError {
@@ -105,6 +110,7 @@ impl TokenGrantInjectionError {
         Self {
             failure,
             credential: None,
+            brokered: false,
         }
     }
 
@@ -112,7 +118,36 @@ impl TokenGrantInjectionError {
         Self {
             failure,
             credential: credential_identity(binding_key).map(str::to_string),
+            brokered: false,
         }
+    }
+
+    fn for_broker(failure: TokenGrantFailure) -> Self {
+        Self {
+            failure,
+            credential: None,
+            brokered: true,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(failure: TokenGrantFailure, brokered: bool) -> Self {
+        Self {
+            failure,
+            credential: None,
+            brokered,
+        }
+    }
+
+    /// Whether the credential broker denied the request. Callers answer a
+    /// denial with 403 and any other refusal with 502.
+    pub fn is_denial(&self) -> bool {
+        self.brokered
+            && matches!(
+                self.failure.kind(),
+                TokenGrantFailureKind::AccessDenied
+                    | TokenGrantFailureKind::ProviderAuthorizationRequired
+            )
     }
 
     /// Return the bounded classification for trusted status reporting.
@@ -162,6 +197,15 @@ pub fn pin_live_credentials(ctx: &mut L7EvalContext) -> Option<Arc<ProviderCrede
     ctx.provider_credential_revision = Some(snapshot.revision);
     ctx.provider_credential_installation_id = Some(snapshot.installation_id.clone());
     Some(snapshot)
+}
+
+/// Apply only the credential broker, for a request without provider credentials.
+pub async fn inject_brokered(
+    req: L7Request,
+    ctx: &L7EvalContext,
+    request_id: &str,
+) -> Result<L7Request, TokenGrantInjectionError> {
+    inject_or_report(req, ctx, Ok(Vec::new()), request_id, None).await
 }
 
 /// Inject the grants whose endpoint selectors match the request.
@@ -251,7 +295,12 @@ async fn inject_or_report(
     request_id: &str,
     observation_context: Option<&EndpointObservationContext>,
 ) -> Result<L7Request, TokenGrantInjectionError> {
-    if selected.as_ref().is_ok_and(Vec::is_empty) {
+    let broker = ctx
+        .credential_broker
+        .as_ref()
+        .and_then(|slot| slot.current())
+        .filter(|state| state.governs(&ctx.host));
+    if selected.as_ref().is_ok_and(Vec::is_empty) && broker.is_none() {
         // Most requests need no grant; keep that path free of allocation.
         return Ok(req);
     }
@@ -274,9 +323,32 @@ async fn inject_or_report(
     } else {
         Vec::new()
     };
-    let result = match selected {
-        Ok(credentials) => inject_selected(req, ctx, credentials, request_id).await,
-        Err(error) => Err(error),
+    let result = match (selected, broker) {
+        (Err(error), _) => Err(error),
+        (Ok(credentials), None) => {
+            inject_selected(req, ctx, credentials, request_id, Vec::new()).await
+        }
+        (Ok(credentials), Some(state)) => {
+            match decide_brokered(&req, ctx, &state, request_id).await {
+                Ok(placements) => {
+                    // The broker owns the headers it writes. A provider grant for
+                    // the same header would override the broker's credential.
+                    let credentials = credentials
+                        .into_iter()
+                        .filter(|(_, credential)| {
+                            !token_grant_header_name(credential).is_ok_and(|header| {
+                                placements.iter().any(|placement| {
+                                    matches!(placement, Placement::Header { name, .. }
+                                    if name.eq_ignore_ascii_case(header))
+                                })
+                            })
+                        })
+                        .collect();
+                    inject_selected(req, ctx, credentials, request_id, placements).await
+                }
+                Err(error) => Err(error),
+            }
+        }
     };
     if let Err(error) = &result {
         report_refused_grant(ctx, &method, &request_path, request_id, error);
@@ -323,6 +395,10 @@ fn report_refused_grant(
     request_id: &str,
     error: &TokenGrantInjectionError,
 ) {
+    if error.brokered {
+        report_refused_brokered(ctx, method, request_path, request_id, error);
+        return;
+    }
     let credential = error
         .credential
         .as_deref()
@@ -358,27 +434,126 @@ fn report_refused_grant(
     );
 }
 
-/// Acquires every selected grant and rewrites the request headers.
+/// Record a refused or failed credential broker decision.
 ///
-/// Any failed acquisition returns an error before any header is written.
+/// A denial uses activity `Other` and any other failure uses `Fail`. Both are
+/// Medium and Blocked. The message names only the destination; the request ID
+/// is a separate field.
+fn report_refused_brokered(
+    ctx: &L7EvalContext,
+    method: &str,
+    request_path: &str,
+    request_id: &str,
+    error: &TokenGrantInjectionError,
+) {
+    let failure = error.failure();
+    warn!(
+        host = %ctx.host,
+        port = ctx.port,
+        request_id = %request_id,
+        code = failure.code(),
+        stage = failure.stage().code(),
+        "Credential broker refused request"
+    );
+    let (activity, verb) = if error.is_denial() {
+        (ActivityId::Other, "denied")
+    } else {
+        (ActivityId::Fail, "failed")
+    };
+    ocsf_emit!(
+        HttpActivityBuilder::new(ocsf_ctx())
+            .activity(activity)
+            .action(ActionId::Denied)
+            .disposition(DispositionId::Blocked)
+            .severity(SeverityId::Medium)
+            .status(StatusId::Failure)
+            .http_request(HttpRequest::new(method, ctx.ocsf_url(request_path)))
+            .dst_endpoint(Endpoint::from_domain(&ctx.host, ctx.port))
+            .message(format!(
+                "Credential broker {verb} request to {}:{}",
+                ctx.host, ctx.port
+            ))
+            .unmapped("request_id", request_id)
+            .build()
+    );
+}
+
+/// Ask the broker for this request's credentials. `pass` returns no
+/// placements. A denial or failure is a brokered error.
+async fn decide_brokered(
+    req: &L7Request,
+    ctx: &L7EvalContext,
+    state: &BrokerState,
+    request_id: &str,
+) -> Result<Vec<Placement>, TokenGrantInjectionError> {
+    let BrokerState::Active(broker) = state else {
+        return Err(TokenGrantInjectionError::for_broker(
+            TokenGrantFailure::new(
+                TokenGrantFailureKind::Configuration,
+                TokenGrantStage::CredentialBroker,
+            ),
+        ));
+    };
+    let decision = broker
+        .decide(BrokerRequest {
+            request_id,
+            method: &req.action,
+            scheme: ctx.request_scheme(),
+            host: &ctx.host,
+            port: ctx.port,
+            path: request_path(&req.target),
+            raw_header: &req.raw_header,
+        })
+        .await
+        .map_err(TokenGrantInjectionError::for_broker)?;
+    match decision {
+        BrokerDecision::Grant(placements) => Ok(placements),
+        BrokerDecision::Pass => {
+            ocsf_emit!(
+                HttpActivityBuilder::new(ocsf_ctx())
+                    .activity(ActivityId::Other)
+                    .action(ActionId::Allowed)
+                    .disposition(DispositionId::Allowed)
+                    .severity(SeverityId::Informational)
+                    .http_request(HttpRequest::new(
+                        &req.action,
+                        ctx.ocsf_url(request_path(&req.target)),
+                    ))
+                    .dst_endpoint(Endpoint::from_domain(&ctx.host, ctx.port))
+                    .message(format!(
+                        "Credential broker passed request to {}:{}",
+                        ctx.host, ctx.port
+                    ))
+                    .build()
+            );
+            Ok(Vec::new())
+        }
+    }
+}
+
+/// Acquires every selected grant and rewrites the request.
+///
+/// `placements` are the credential broker's values, written with the provider
+/// grants. Any failed acquisition returns an error before any field is written.
 async fn inject_selected(
     req: L7Request,
     ctx: &L7EvalContext,
     credentials: Vec<(String, ProviderProfileCredential)>,
     request_id: &str,
+    placements: Vec<Placement>,
 ) -> Result<L7Request, TokenGrantInjectionError> {
-    let resolver = ctx
-        .token_grant_resolver
-        .as_ref()
-        .ok_or_else(|| TokenGrantInjectionError::new(injection_configuration_failure()))?;
     // A request that cannot carry a header never acquires a credential.
     parse_header_block(&req.raw_header).map_err(TokenGrantInjectionError::new)?;
 
     // Release the credential snapshot lock before acquisition. Keep all token values
     // local until every selected grant and header has been validated, so a later
     // failure cannot expose a partially authenticated request to a relay caller.
-    let mut headers = Vec::with_capacity(credentials.len());
+    let mut headers = Vec::with_capacity(credentials.len() + placements.len());
     for (provider_key, cred) in &credentials {
+        let resolver = ctx
+            .token_grant_resolver
+            .as_ref()
+            .ok_or_else(|| TokenGrantInjectionError::new(injection_configuration_failure()))?;
         let refused = |failure| TokenGrantInjectionError::for_binding(failure, provider_key);
         let token_grant = cred
             .token_grant
@@ -392,10 +567,57 @@ async fn inject_selected(
         headers.push(token_grant_header(cred, &access_token).map_err(refused)?);
     }
 
+    let brokered = !placements.is_empty();
+    let mut query_parameters = Vec::new();
+    for placement in placements {
+        match placement {
+            Placement::Header { name, value } => headers.push((name, value)),
+            Placement::QueryParameter { name, value } => query_parameters.push((name, value)),
+        }
+    }
     let mut raw_header = req.raw_header;
     for (name, value) in headers {
         raw_header =
             inject_header(&raw_header, &name, &value).map_err(TokenGrantInjectionError::new)?;
+    }
+    let mut target = req.target;
+    let mut query_params = req.query_params;
+    for (name, value) in query_parameters {
+        (raw_header, target) =
+            crate::credential_broker::replace_query_parameter(&raw_header, &name, &value).map_err(
+                |()| {
+                    TokenGrantInjectionError::for_broker(TokenGrantFailure::new(
+                        TokenGrantFailureKind::Configuration,
+                        TokenGrantStage::Injection,
+                    ))
+                },
+            )?;
+        query_params.insert(name, vec![value]);
+    }
+    let req = L7Request {
+        target,
+        query_params,
+        raw_header,
+        ..req
+    };
+    if brokered {
+        ocsf_emit!(
+            HttpActivityBuilder::new(ocsf_ctx())
+                .activity(ActivityId::Other)
+                .action(ActionId::Allowed)
+                .disposition(DispositionId::Allowed)
+                .severity(SeverityId::Informational)
+                .http_request(HttpRequest::new(
+                    &req.action,
+                    ctx.ocsf_url(request_path(&req.target)),
+                ))
+                .dst_endpoint(Endpoint::from_domain(&ctx.host, ctx.port))
+                .message(format!(
+                    "Credential broker granted request to {}:{}",
+                    ctx.host, ctx.port
+                ))
+                .build()
+        );
     }
     for (provider_key, _) in credentials {
         ocsf_emit!(
@@ -420,7 +642,7 @@ async fn inject_selected(
                 .build()
         );
     }
-    Ok(L7Request { raw_header, ..req })
+    Ok(req)
 }
 
 fn request_path(target: &str) -> &str {
@@ -1069,7 +1291,7 @@ pub mod test_support {
             .and_then(EndpointObservationSender::capture);
         let mut pinned = ctx.clone();
         let Some(snapshot) = pin_live_credentials(&mut pinned) else {
-            return Ok(req);
+            return inject_brokered(req, ctx, request_id).await;
         };
         inject_for_selectors(
             req,
@@ -1333,6 +1555,7 @@ mod tests {
             secret_resolver: None,
             provider_credentials: Some(fixture.provider_credentials()),
             token_grant_resolver: Some(fixture.resolver()),
+            credential_broker: None,
             ..Default::default()
         };
         let req = L7Request {
@@ -1372,6 +1595,7 @@ mod tests {
             activity_tx: None,
             provider_credentials: Some(fixture.provider_credentials()),
             token_grant_resolver: Some(fixture.resolver()),
+            credential_broker: None,
             ..Default::default()
         };
         let req = L7Request {
@@ -1411,6 +1635,7 @@ mod tests {
             secret_resolver: None,
             provider_credentials: Some(fixture.provider_credentials()),
             token_grant_resolver: Some(fixture.resolver()),
+            credential_broker: None,
             ..Default::default()
         };
         let req = L7Request {
@@ -1445,6 +1670,7 @@ mod tests {
             port: 443,
             provider_credentials: Some(fixture.provider_credentials()),
             token_grant_resolver: Some(fixture.resolver()),
+            credential_broker: None,
             ..Default::default()
         }
     }
