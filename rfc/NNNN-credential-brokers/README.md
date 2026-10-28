@@ -54,8 +54,6 @@ protocol to its credential source.
   gateway change.
 - The credential source revokes a workload's access to GitHub. The broker
   denies the workload's next GitHub request with 403.
-- The broker exchanges the agent's bearer token for a credential scoped to the
-  target API, so the upstream API sees the user.
 - The broker answers `pass` for hosts it does not govern. The operator can
   select every host without breaking traffic to those hosts.
 
@@ -63,8 +61,7 @@ protocol to its credential source.
 
 - Replacing network policy. Policy still admits the connection and request
   before the broker runs.
-- Request bodies or arbitrary headers. The broker sees the request target and,
-  when enabled, the agent's `Authorization` header.
+- Request headers or bodies. The broker sees only the request target.
 - Per-sandbox or per-policy brokers. There is one broker per gateway, set by
   the operator.
 - Credentials for traffic OpenShell does not parse as HTTP.
@@ -87,7 +84,6 @@ audience = "urn:openshell:extension:credential-broker:corp-broker"
 timeout = "1s"
 include_hosts = ["**"]
 exclude_hosts = ["status.example.com"]
-forward_authorization = true
 ```
 
 | Field | Meaning |
@@ -99,7 +95,6 @@ forward_authorization = true
 | `timeout` | Per-call deadline, 10 ms to 30 s. Defaults to `1s`. |
 | `include_hosts` | Required. Hosts whose requests go to the broker, in network policy host syntax. At most 32 patterns with `exclude_hosts`. |
 | `exclude_hosts` | Optional. Takes precedence over `include_hosts`. |
-| `forward_authorization` | Send the agent's `Authorization` header values to the broker. Defaults to `false`. |
 
 `openshell-gateway config preflight` validates the section. At startup the
 gateway also calls `Describe` to resolve compatibility, as it does for
@@ -167,9 +162,6 @@ message HttpCredentialRequest {
   uint32 port = 6;
   // Request path without the query string.
   string path = 7;
-  // The agent's Authorization header values, in wire order, as the agent
-  // sent them. Empty unless the registration sets forward_authorization.
-  repeated string authorization = 8;
 }
 
 message HttpCredentialResult {
@@ -209,10 +201,8 @@ enum DenyReason {
 The extension family's base capability is
 `openshell.credential-broker.contract`, protocol `1.0`.
 
-The request does not include the query string, the body, or any header other
-than `Authorization`. `authorization` holds the header as the agent sent it,
-before placeholder resolution, so the broker never receives a credential that
-OpenShell manages.
+The request does not include the query string, request headers, or the body.
+The broker never receives a credential that OpenShell manages.
 
 ### Request flow
 
@@ -263,8 +253,8 @@ them with the same code:
 |---|---|
 | `bearer` | `Bearer <value>` in `header_name`, default `Authorization` |
 | `basic` | `Basic <base64(value)>` in `header_name`, default `Authorization`. The value is `user:password`. |
-| `header` | The value in `header_name`, which is required |
-| `query` | The value in query parameter `query_param`, which is required |
+| `header` | The value in `header_name`. `header_name` is required with this style. |
+| `query` | The value in query parameter `query_param`. `query_param` is required with this style. |
 
 The supervisor validates the result before it changes the request. A field the
 style does not use must be empty. Header names must be valid HTTP tokens. The supervisor rejects placements on routing,
@@ -310,8 +300,7 @@ valid one.
   `deny` and failures are Medium, with the request ID.
 - `DetectionFinding`, High, for refused uninspected traffic to a selected host.
 
-OpenShell does not log placement values, the agent's `Authorization` values, or
-broker error text.
+OpenShell does not log placement values or broker error text.
 
 ### Example broker
 
@@ -344,8 +333,7 @@ The broker is opt-in. A gateway without the section behaves as before.
 - Each request to a selected host waits for one gRPC call, and the broker may
   wait on its credential source. A broker outage returns 502 for every
   selected request.
-- The broker sees the target of every selected request and, with
-  `forward_authorization`, the agent's bearer tokens. It can place any
+- The broker sees the target of every selected request and can place any
   credential on those requests. Only the operator can configure it.
 - Extension tokens are bearer tokens. A captured token can call the broker as
   that sandbox until the token expires, at most one hour after issue.
