@@ -23,10 +23,11 @@ pub enum AuthStyle {
     /// `Basic <base64(credential)>` in `header_name`, default `Authorization`.
     /// The credential is `user:password`.
     Basic,
-    /// The credential unchanged in `header_name`, which is required.
+    /// The credential unchanged in `header_name`. This style requires
+    /// `header_name`.
     Header,
-    /// The credential unchanged in query parameter `query_param`, which is
-    /// required.
+    /// The credential unchanged in query parameter `query_param`. This style
+    /// requires `query_param`.
     Query,
 }
 
