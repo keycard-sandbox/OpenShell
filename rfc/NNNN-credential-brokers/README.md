@@ -20,9 +20,9 @@ answers with one of three decisions:
   still apply.
 - `deny`: refuse the request with HTTP 403.
 
-Only the broker talks to the authorization server. A broker for Keycard, or for
-any OAuth 2.0 authorization server, performs the RFC 8693 token exchange with
-an RFC 8707 resource on its own side of the contract.
+The broker gets credentials from a credential source of its choice, such as a
+secret store, a token service, or its own policy. OpenShell does not depend on
+which.
 
 ## Motivation
 
@@ -36,25 +36,24 @@ on the next request. The existing extension points do not provide it:
   be known before the sandbox starts.
 - Supervisor middleware ([RFC 0009](../0009-supervisor-middleware/README.md))
   runs before credential injection. It cannot read or write credential headers.
-- Provider token grants call an OAuth token endpoint, but each grant is bound
-  to the endpoints and audience of one provider profile on each gateway.
+- Provider token grants request a token for the endpoints and audience of one
+  provider profile, configured on each gateway. A grant can issue a token or
+  fail. It cannot allow a request without a credential.
 
-Authorization servers differ in how they identify workloads, which grant types
-they use, and how they report a refusal. The central authority also needs
-three answers: issue a credential, allow the request without one, or refuse it.
-An OAuth token endpoint has only two.
-
-A typed extension contract keeps authorization server logic out of OpenShell.
-OpenShell keeps inspection, policy, workload identity, header placement, and
-failing closed. The broker owns the authorization server protocol.
+Credential sources differ in how they identify workloads, how they issue
+credentials, and how they report a refusal. A typed extension contract keeps
+that logic out of OpenShell. OpenShell keeps inspection, policy, workload
+identity, credential placement, and failing closed. The broker owns the
+protocol to its credential source.
 
 ### Use cases
 
-- An administrator adds `api.linear.app` in the authorization server. The
-  broker grants a token for it on the next request, with no gateway change.
-- The authorization server revokes a workload's access to GitHub. The broker
+- An administrator gives workloads access to `api.linear.app` in the credential
+  source. The broker grants a credential for it on the next request, with no
+  gateway change.
+- The credential source revokes a workload's access to GitHub. The broker
   denies the workload's next GitHub request with 403.
-- The broker exchanges the agent's bearer token for a token scoped to the
+- The broker exchanges the agent's bearer token for a credential scoped to the
   target API, so the upstream API sees the user.
 - The broker answers `pass` for hosts it does not govern. The operator can
   select every host without breaking traffic to those hosts.
@@ -68,7 +67,7 @@ failing closed. The broker owns the authorization server protocol.
 - Per-sandbox or per-policy brokers. There is one broker per gateway, set by
   the operator.
 - Credentials for traffic OpenShell does not parse as HTTP.
-- An OAuth client in the supervisor.
+- A protocol between OpenShell and any credential source.
 
 ## Proposal
 
@@ -78,10 +77,10 @@ The operator registers the broker in `gateway.toml`:
 
 ```toml
 [openshell.supervisor.credential_broker]
-name = "keycard"
+name = "corp-broker"
 grpc_endpoint = "https://credential-broker.openshell.svc:8443"
 tls_ca_cert_path = "/etc/openshell/certs/broker-ca.pem"
-audience = "urn:openshell:extension:credential-broker:keycard"
+audience = "urn:openshell:extension:credential-broker:corp-broker"
 timeout = "1s"
 include_hosts = ["**"]
 exclude_hosts = ["status.example.com"]
@@ -95,15 +94,15 @@ forward_authorization = true
 | `tls_ca_cert_path` | Optional private CA for the broker's certificate. |
 | `audience` | Extension token audience. Defaults to `urn:openshell:extension:credential-broker:<name>`. |
 | `timeout` | Per-call deadline, 10 ms to 30 s. Defaults to `1s`. |
-| `include_hosts` | Required. Hosts whose requests go to the broker, in network policy host syntax. |
+| `include_hosts` | Required. Hosts whose requests go to the broker, in network policy host syntax. At most 32 patterns with `exclude_hosts`. |
 | `exclude_hosts` | Optional. Takes precedence over `include_hosts`. |
 | `forward_authorization` | Send the agent's `Authorization` header values to the broker. Defaults to `false`. |
 
-At startup the gateway connects to the broker, calls `Describe`, and checks
-peer metadata and `expected_audience`, as it does for middleware. It refuses to
-start if the broker is unavailable or incompatible.
-`openshell-gateway config preflight` runs the same checks. Changing the section
-requires a gateway restart.
+`openshell-gateway config preflight` validates the section. At startup the
+gateway also connects to the broker, calls `Describe`, and checks peer metadata
+and `expected_audience`, as it does for middleware. It refuses to start if the
+broker is unavailable or incompatible. An authenticated registration requires
+gateway JWT signing material. Changing the section requires a gateway restart.
 
 The gateway sends the registration to every supervisor in
 `GetSandboxConfigResponse`. Sandbox policy does not select the broker, so a
@@ -119,9 +118,8 @@ as it does for middleware services. The broker MUST authorize on the token's
 claims. Fields in the request message are for audit only.
 
 The supervisor does not need a SPIFFE socket, an assertion file, or any
-platform-specific identity. The broker decides how to prove the sandbox's
-identity to its authorization server. See
-[Example: an OAuth broker](#example-an-oauth-broker).
+platform-specific identity. The broker decides how to identify the sandbox to
+its credential source.
 
 ### Contract
 
@@ -211,14 +209,14 @@ sequenceDiagram
     participant Agent
     participant Supervisor
     participant Broker as Credential broker
-    participant AS as Authorization server
+    participant Source as Credential source
     participant API as Upstream API
 
     Agent->>Supervisor: HTTPS request to api.github.com
     Supervisor->>Supervisor: network policy, L7 policy, middleware
     Supervisor->>Broker: GrantHttpRequest(target, sandbox token)
-    Broker->>AS: token exchange, resource=https://api.github.com
-    AS-->>Broker: token, or refusal
+    Broker->>Source: credential for this sandbox and target
+    Source-->>Broker: credential, or refusal
     alt grant
         Broker-->>Supervisor: grant, Authorization: Bearer token
         Supervisor->>API: request with broker credential
@@ -249,10 +247,11 @@ The supervisor validates the result before it changes the request. Header names
 must be valid HTTP tokens. The supervisor rejects placements on routing,
 framing, hop-by-hop, `Connection`-nominated, and `x-openshell-*` headers.
 Values must not contain control characters. A result has at most 8 placements
-of at most 8 KiB each. An invalid result is a broker error.
+of at most 8 KiB each, and names each target once. An invalid result is a
+broker error.
 
 The supervisor does not cache results, so every request gets the broker's
-current decision. The broker caches upstream tokens if it wants to.
+current decision. The broker caches credentials if it wants to.
 
 ### Failures
 
@@ -269,13 +268,12 @@ The broker fails closed. It has no `on_error` setting.
 | Invalid result, or any other status | 502 | `unclassified` |
 
 These are the [token grant failure](../../docs/how-it-works/providers/profiles.mdx)
-codes, plus `access_denied`. OpenShell does not log gRPC status messages from
-the broker.
+codes, plus `access_denied`, with the new stage `credential_broker`. OpenShell
+does not log gRPC status messages from the broker.
 
 The supervisor refuses traffic to a selected host that it cannot parse as HTTP:
 `tls: skip` endpoints, raw TCP, and transparent TCP. It emits a High
-`DetectionFinding` for each refusal. Gateway policy validation warns when a
-policy endpoint with `tls: skip` matches `include_hosts`.
+`DetectionFinding` for each refusal.
 
 If a supervisor cannot install the broker registration, it refuses every
 request to every host, and every uninspected connection, until it installs a
@@ -292,30 +290,12 @@ valid one.
 OpenShell does not log placement values, the agent's `Authorization` values, or
 broker error text.
 
-### Example: an OAuth broker
+### Example broker
 
-A reference broker in `examples/credential-broker-oauth` works with any OAuth
-2.0 authorization server. For each call it:
-
-1. Verifies the extension token and reads `sandbox_id`.
-2. Authenticates to the authorization server as the sandbox, in one of two
-   ways:
-   - The authorization server trusts the gateway's JWKS. The registration's
-     `audience` is the authorization server's issuer, and the broker forwards
-     the extension token as `client_assertion`.
-   - The broker is its own issuer. It signs a short-lived assertion with `sub`
-     set to the sandbox, and the authorization server trusts the broker's
-     signing key.
-3. Sends an RFC 8693 token exchange with `resource` set to the request origin,
-   and the forwarded `Authorization` bearer token as `subject_token`. Without a
-   user token, it uses `client_credentials`.
-4. Maps the response. A token is `grant`. `access_denied`, `invalid_target`,
-   `unauthorized_client`, and `invalid_grant` are `deny ACCESS_DENIED`.
-   `insufficient_authorization` is `deny AUTHORIZATION_REQUIRED`. A resource the
-   authorization server does not govern is `pass`, using whatever signal that
-   server provides.
-
-Keycard can run this broker or ship its own.
+`examples/credential-broker` is a small broker that reads its decisions from a
+YAML file: a credential per host pattern, hosts to deny, and `pass` for the
+rest. It verifies the extension token and reloads the file on every call. It
+shows the contract without a real credential source.
 
 ## Implementation plan
 
@@ -323,8 +303,8 @@ The broker is opt-in. A gateway without the section behaves as before.
 
 1. Add `proto/credential_broker.proto`, the registration message in
    `sandbox.proto`, and the `access_denied` failure code.
-2. In the gateway, add config parsing and validation, the startup `Describe`
-   call, preflight, delivery in sandbox config, and extension tokens for the
+2. In the gateway, add config parsing and validation, preflight, the startup
+   `Describe` call, delivery in sandbox config, and extension tokens for the
    broker audience in `RefreshSandboxToken`.
 3. In the supervisor, add the broker client, install the registration before
    the proxy accepts connections, call the broker at the credential injection
@@ -332,14 +312,14 @@ The broker is opt-in. A gateway without the section behaves as before.
    uninspected traffic to selected hosts.
 4. Add `docs/extensibility/credential-brokers.mdx`, and update the gateway
    configuration reference and the failure code table.
-5. Add the OAuth reference broker with a smoke test, unit tests for result
-   validation and failure mapping, and an e2e test with a stub broker that
-   returns each decision.
+5. Add the example broker with a smoke test, unit tests for result validation
+   and failure mapping, and an e2e test with a stub broker that returns each
+   decision.
 
 ## Risks
 
 - Each request to a selected host waits for one gRPC call, and the broker may
-  wait on its authorization server. A broker outage returns 502 for every
+  wait on its credential source. A broker outage returns 502 for every
   selected request.
 - The broker sees the target of every selected request and, with
   `forward_authorization`, the agent's bearer tokens. It can place any
@@ -356,14 +336,14 @@ The broker is opt-in. A gateway without the section behaves as before.
 
 ## Alternatives
 
-### Supervisor OAuth client
+### Gateway-wide provider token grants
 
-The supervisor sends OAuth token requests directly to an authorization server
-named in gateway configuration. No extra service runs, and any
-standards-compliant authorization server works without custom code. OpenShell
-then owns assertion sources, grant types, OAuth error mapping, and Kubernetes
-token projection. Every authorization server difference needs an OpenShell
-change, and the supervisor cannot express `pass`.
+Let one provider token grant apply to every sandbox and every host. The
+supervisor would request a token for each request from one token endpoint
+named in gateway configuration. OpenShell would then own the workload
+identity sources, request formats, and error mapping of that token endpoint,
+and every difference between credential sources would need an OpenShell
+change. A token endpoint also cannot express `pass`.
 
 ### A middleware binding
 
@@ -382,7 +362,7 @@ gateway to the driver, which puts the gateway on the request path.
 ### Do nothing
 
 Each new upstream needs a provider profile change on every gateway, and
-revocation waits for token expiry.
+revocation waits for credential expiry.
 
 ## Prior art
 
@@ -408,7 +388,7 @@ supervisor middleware and gateway interceptors use.
   grant service", which suggests tokens only, and "credential middleware",
   which suggests the RFC 0009 chain.
 - Should the extension token or request include the sandbox's workspace,
-  owner, or the policy that admitted the request? The authorization server may
+  owner, or the policy that admitted the request? The credential source may
   need them for per-user decisions.
 - Should a grant include a TTL so the supervisor can reuse it for the same
   sandbox and origin? A TTL removes the call from most requests and makes
