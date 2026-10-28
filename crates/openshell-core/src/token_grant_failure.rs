@@ -33,6 +33,8 @@ pub enum TokenGrantFailureKind {
     ProviderAuthorizationRequired,
     /// An authenticated component rejected the workload identity.
     WorkloadIdentityRejected,
+    /// A credential broker refused the sandbox access to the resource.
+    AccessDenied,
     /// Local configuration or an authenticated configuration contract is invalid.
     Configuration,
     /// A grant operation exceeded its time limit.
@@ -44,9 +46,10 @@ pub enum TokenGrantFailureKind {
 }
 
 impl TokenGrantFailureKind {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::ProviderAuthorizationRequired,
         Self::WorkloadIdentityRejected,
+        Self::AccessDenied,
         Self::Configuration,
         Self::Timeout,
         Self::Unavailable,
@@ -57,6 +60,7 @@ impl TokenGrantFailureKind {
         match self {
             Self::ProviderAuthorizationRequired => "provider_authorization_required",
             Self::WorkloadIdentityRejected => "workload_identity_rejected",
+            Self::AccessDenied => "access_denied",
             Self::Configuration => "configuration_error",
             Self::Timeout => "timeout",
             Self::Unavailable => "unavailable",
@@ -73,7 +77,7 @@ impl TokenGrantFailureKind {
             Self::ProviderAuthorizationRequired => {
                 ProviderCredentialRefreshRecoveryAction::Reauthorize
             }
-            Self::WorkloadIdentityRejected | Self::Configuration => {
+            Self::WorkloadIdentityRejected | Self::AccessDenied | Self::Configuration => {
                 ProviderCredentialRefreshRecoveryAction::FixConfiguration
             }
             Self::Timeout | Self::Unavailable => ProviderCredentialRefreshRecoveryAction::Retry,
@@ -84,7 +88,7 @@ impl TokenGrantFailureKind {
     const fn status_code(self) -> Code {
         match self {
             Self::ProviderAuthorizationRequired | Self::Configuration => Code::FailedPrecondition,
-            Self::WorkloadIdentityRejected => Code::PermissionDenied,
+            Self::WorkloadIdentityRejected | Self::AccessDenied => Code::PermissionDenied,
             Self::Timeout => Code::DeadlineExceeded,
             Self::Unavailable => Code::Unavailable,
             Self::Unclassified => Code::Unknown,
@@ -107,16 +111,19 @@ pub enum TokenGrantStage {
     TokenEndpoint,
     /// Preparing or injecting the token into the protected request.
     Injection,
+    /// Calling the operator-registered credential broker.
+    CredentialBroker,
 }
 
 impl TokenGrantStage {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Configuration,
         Self::WorkloadIdentity,
         Self::GatewayRpc,
         Self::IntermediateExchange,
         Self::TokenEndpoint,
         Self::Injection,
+        Self::CredentialBroker,
     ];
 
     /// Return the stable stage code for trusted local consumers.
@@ -128,6 +135,7 @@ impl TokenGrantStage {
             Self::IntermediateExchange => "intermediate_exchange",
             Self::TokenEndpoint => "token_endpoint",
             Self::Injection => "injection",
+            Self::CredentialBroker => "credential_broker",
         }
     }
 
@@ -373,6 +381,11 @@ mod tests {
                 ),
                 (
                     "workload_identity_rejected",
+                    Recovery::FixConfiguration,
+                    Code::PermissionDenied
+                ),
+                (
+                    "access_denied",
                     Recovery::FixConfiguration,
                     Code::PermissionDenied
                 ),
