@@ -495,8 +495,8 @@ message SupervisorCredentialBroker {
   // PEM-encoded trust roots loaded by the gateway from tls_ca_cert_path.
   // Empty uses the platform trust store.
   bytes tls_ca_cert_pem = 3;
-  // Exact extension token audience. The gateway resolves an omitted operator
-  // value before sending sandbox config.
+  // Exact `aud` of the extension tokens OpenShell sends to the broker. The
+  // gateway resolves an omitted operator value before sending sandbox config.
   string audience = 4;
   // Operator opt-out from extension authentication. When true the endpoint
   // may be plaintext and OpenShell attaches no bearer credential.

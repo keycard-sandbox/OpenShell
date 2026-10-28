@@ -2502,8 +2502,8 @@ type SupervisorCredentialBroker struct {
 	// PEM-encoded trust roots loaded by the gateway from tls_ca_cert_path.
 	// Empty uses the platform trust store.
 	TlsCaCertPem []byte `protobuf:"bytes,3,opt,name=tls_ca_cert_pem,json=tlsCaCertPem,proto3" json:"tls_ca_cert_pem,omitempty"`
-	// Exact extension token audience. The gateway resolves an omitted operator
-	// value before sending sandbox config.
+	// Exact `aud` of the extension tokens OpenShell sends to the broker. The
+	// gateway resolves an omitted operator value before sending sandbox config.
 	Audience string `protobuf:"bytes,4,opt,name=audience,proto3" json:"audience,omitempty"`
 	// Operator opt-out from extension authentication. When true the endpoint
 	// may be plaintext and OpenShell attaches no bearer credential.
