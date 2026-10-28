@@ -20,6 +20,7 @@ mod compute;
 mod config_delivery;
 pub mod config_file;
 mod config_update_operation;
+mod credential_broker;
 mod credentials;
 mod defaults;
 mod gateway_listener;
@@ -127,7 +128,7 @@ fn mint_gateway_extension_credential(
     // A middleware endpoint must be reachable from sandbox supervisors, so a
     // gateway-local Unix socket is only an option for interceptors.
     let (accepted, supports_unix) = match kind {
-        ExtensionKind::Middleware => ("https://", false),
+        ExtensionKind::Middleware | ExtensionKind::CredentialBroker => ("https://", false),
         ExtensionKind::Interceptor => ("https:// or unix://", true),
         _ => {
             return Err(Error::config(format!(
@@ -382,6 +383,10 @@ pub struct ServerState {
     /// Validated built-in and operator-registered supervisor middleware.
     pub middleware_registry: Arc<MiddlewareRegistry>,
 
+    /// Operator-registered credential broker that answered `Describe` at
+    /// startup. `None` when `[openshell.supervisor.credential_broker]` is absent.
+    pub(crate) credential_broker: Option<credential_broker::CredentialBroker>,
+
     /// OIDC JWKS cache for JWT validation. `None` when OIDC is not configured.
     pub oidc_cache: Option<Arc<auth::oidc::JwksCache>>,
 
@@ -520,6 +525,7 @@ impl ServerState {
             gateway_peers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             extension_mint_limiter: auth::extension_mint_limit::ExtensionMintLimiter::default(),
             middleware_registry: Arc::new(MiddlewareRegistry::default()),
+            credential_broker: None,
             oidc_cache,
             extension_jwt_issuer: None,
             sandbox_session_jwt_authority: None,
@@ -679,6 +685,51 @@ pub(crate) async fn run_server(
         .map_err(|error| Error::config(format!("middleware registration failed: {error}")))?,
     );
 
+    let credential_broker = match config_file
+        .as_ref()
+        .and_then(|file| file.openshell.supervisor.credential_broker.as_ref())
+    {
+        Some(section) => {
+            let registration = openshell_core::proto::SupervisorCredentialBroker::try_from(section)
+                .map_err(|error| Error::config(format!("credential broker: {error}")))?;
+            let bearer = match extension_jwt_issuer.as_ref() {
+                Some(issuer) => mint_gateway_extension_credential(
+                    issuer,
+                    ExtensionKind::CredentialBroker,
+                    &registration.name,
+                    &registration.audience,
+                    &registration.grpc_endpoint,
+                    registration.allow_insecure_transport,
+                )?
+                .map(|credential| {
+                    let slot = credential.slot.clone();
+                    gateway_extension_credentials.push(credential);
+                    slot
+                }),
+                None if registration.allow_insecure_transport => None,
+                None => {
+                    return Err(Error::config(
+                        "the credential broker requires gateway_jwt signing material to \
+                         authenticate supervisors; configure [openshell.gateway.gateway_jwt] or \
+                         set allow_insecure_transport = true",
+                    ));
+                }
+            };
+            let broker = credential_broker::connect(registration, bearer)
+                .await
+                .map_err(Error::config)?;
+            info!(
+                name = %broker.registration.name,
+                include_hosts = ?broker.registration.include_hosts,
+                exclude_hosts = ?broker.registration.exclude_hosts,
+                forward_authorization = broker.registration.forward_authorization,
+                "credential broker configured"
+            );
+            Some(broker)
+        }
+        None => None,
+    };
+
     let store = Arc::new(
         Store::connect_with_pool_sizes(
             database_url,
@@ -798,6 +849,7 @@ pub(crate) async fn run_server(
         credentials,
     );
     state.middleware_registry = middleware_registry;
+    state.credential_broker = credential_broker;
     state.gateway_interceptors = gateway_interceptors;
     state.provider_profile_sources = provider_profile_sources;
     state.extension_jwt_issuer = extension_jwt_issuer.clone();

@@ -1888,6 +1888,23 @@ pub struct SettingsPollResult {
     pub policy_validation_failure_mode: crate::PolicyValidationFailureMode,
     /// Whether the gateway can mint authenticated extension credentials.
     pub extension_authentication_enabled: bool,
+    /// Operator-registered credential broker, if the gateway configures one.
+    pub credential_broker: Option<crate::proto::SupervisorCredentialBroker>,
+}
+
+impl SettingsPollResult {
+    /// Middleware services plus the credential broker, as entries for
+    /// extension credential requests.
+    #[must_use]
+    pub fn extension_credential_services(&self) -> Vec<crate::proto::SupervisorMiddlewareService> {
+        let mut services = self.supervisor_middleware_services.clone();
+        services.extend(
+            self.credential_broker
+                .as_ref()
+                .map(crate::credential_broker::credential_service),
+        );
+        services
+    }
 }
 
 fn settings_poll_result(inner: crate::proto::GetSandboxConfigResponse) -> SettingsPollResult {
@@ -1913,6 +1930,7 @@ fn settings_poll_result(inner: crate::proto::GetSandboxConfigResponse) -> Settin
             .parse()
             .unwrap_or_default(),
         extension_authentication_enabled: inner.extension_authentication_enabled,
+        credential_broker: inner.credential_broker,
     }
 }
 
@@ -1938,6 +1956,7 @@ impl From<crate::proto::SandboxConfigSnapshot> for SettingsPollResult {
             configuration_instance_id: snapshot.configuration_instance_id,
             configuration_error: snapshot.configuration_error,
             settings_revision: snapshot.settings_revision,
+            credential_broker: snapshot.credential_broker,
         })
     }
 }

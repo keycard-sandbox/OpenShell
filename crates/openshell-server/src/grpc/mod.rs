@@ -275,6 +275,12 @@ impl OpenShell for OpenShellService {
         negotiated_extensions.extend_from_slice(self.state.credentials.negotiated_extensions());
         negotiated_extensions
             .extend_from_slice(self.state.middleware_registry.negotiated_extensions());
+        negotiated_extensions.extend(
+            self.state
+                .credential_broker
+                .as_ref()
+                .map(|broker| broker.negotiated.clone()),
+        );
         if let Some(interceptors) = self.state.gateway_interceptors.as_ref() {
             negotiated_extensions.extend_from_slice(interceptors.negotiated_extensions());
         }
@@ -943,6 +949,7 @@ fn public_extension_info(extension: &NegotiatedExtension) -> NegotiatedExtension
         ExtensionFamily::Credentials => ExtensionKind::CredentialDriver,
         ExtensionFamily::GatewayInterceptor => ExtensionKind::GatewayInterceptor,
         ExtensionFamily::SupervisorMiddleware => ExtensionKind::SupervisorMiddleware,
+        ExtensionFamily::CredentialBroker => ExtensionKind::CredentialBroker,
     };
     NegotiatedExtensionInfo {
         kind: kind.into(),

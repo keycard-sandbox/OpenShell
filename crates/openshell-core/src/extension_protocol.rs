@@ -36,6 +36,7 @@ pub enum ExtensionFamily {
     Credentials,
     GatewayInterceptor,
     SupervisorMiddleware,
+    CredentialBroker,
 }
 
 impl ExtensionFamily {
@@ -46,6 +47,7 @@ impl ExtensionFamily {
             Self::Credentials => "credentials",
             Self::GatewayInterceptor => "gateway-interceptor",
             Self::SupervisorMiddleware => "supervisor-middleware",
+            Self::CredentialBroker => "credential-broker",
         }
     }
 

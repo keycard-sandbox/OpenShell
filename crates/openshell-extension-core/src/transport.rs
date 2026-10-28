@@ -123,17 +123,36 @@ pub async fn connect_channel(config: &ExtensionChannelConfig) -> Result<Channel,
         return connect_unix(PathBuf::from(path)).await;
     }
 
-    let mut endpoint = standard_endpoint(&config.endpoint)?;
-    if config.endpoint.starts_with("https://") {
-        let tls = match &config.server_trust {
-            ExtensionServerTrust::PlatformRoots => ClientTlsConfig::new().with_enabled_roots(),
-            ExtensionServerTrust::CustomCaPem(pem) => {
-                ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem))
-            }
-        };
-        endpoint = endpoint.tls_config(tls).map_err(TransportError::Tls)?;
+    tcp_endpoint(config)?
+        .connect()
+        .await
+        .map_err(TransportError::Connect)
+}
+
+/// Build a channel that connects on first use and reconnects after a failure.
+///
+/// A service that is down when the channel is built fails each call with
+/// `UNAVAILABLE` until it comes back. Unix sockets are not supported.
+pub fn connect_channel_lazy(config: &ExtensionChannelConfig) -> Result<Channel, TransportError> {
+    validate_config(config)?;
+    if config.endpoint.starts_with("unix://") {
+        return Err(TransportError::UnsupportedScheme);
     }
-    endpoint.connect().await.map_err(TransportError::Connect)
+    Ok(tcp_endpoint(config)?.connect_lazy())
+}
+
+fn tcp_endpoint(config: &ExtensionChannelConfig) -> Result<Endpoint, TransportError> {
+    let endpoint = standard_endpoint(&config.endpoint)?;
+    if !config.endpoint.starts_with("https://") {
+        return Ok(endpoint);
+    }
+    let tls = match &config.server_trust {
+        ExtensionServerTrust::PlatformRoots => ClientTlsConfig::new().with_enabled_roots(),
+        ExtensionServerTrust::CustomCaPem(pem) => {
+            ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem))
+        }
+    };
+    endpoint.tls_config(tls).map_err(TransportError::Tls)
 }
 
 fn validate_config(config: &ExtensionChannelConfig) -> Result<(), TransportError> {
@@ -221,6 +240,19 @@ mod tests {
         fn call(&mut self, _request: http::Request<Body>) -> Self::Future {
             ready(Ok(http::Response::new(Body::empty())))
         }
+    }
+
+    #[tokio::test]
+    async fn lazy_channel_does_not_dial_and_rejects_unix_sockets() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        connect_channel_lazy(&ExtensionChannelConfig::new(format!("http://{address}")))
+            .expect("a lazy channel builds while nothing listens");
+        assert!(matches!(
+            connect_channel_lazy(&ExtensionChannelConfig::new("unix:///run/broker.sock")),
+            Err(TransportError::UnsupportedScheme)
+        ));
     }
 
     #[test]

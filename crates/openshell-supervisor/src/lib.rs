@@ -5103,6 +5103,7 @@ network_policies:
             workspace: String::new(),
             policy_validation_failure_mode: PolicyValidationFailureMode::default(),
             extension_authentication_enabled: false,
+            credential_broker: None,
             configuration_admitted: true,
             configuration_error: String::new(),
             configuration_instance_id: String::new(),
