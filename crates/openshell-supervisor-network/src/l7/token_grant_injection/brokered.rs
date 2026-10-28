@@ -55,7 +55,6 @@ fn broker_slot(
     let broker = CredentialBroker::new(
         HostSelector::new(&["api.example.com".to_string()], &[]).unwrap(),
         Duration::from_secs(1),
-        false,
         "sandbox-1",
         endpoint.clone(),
     );

@@ -167,7 +167,7 @@ mod tests {
     // and ExtensionKind gains CREDENTIAL_BROKER. The gateway reads the broker
     // from its config file and never stores it.
     const PUBLIC_RPC_SCHEMA_SHA256: &str =
-        "c390b44a22c786ce926524728af9abedef428b0a80244708150091216df68ee9";
+        "ea47c3b8cb1ec571d5b79fd95ceca3a674b691348402a6995fbae79f04c195ce";
     const DURABLE_SCHEMA_SHA256: &str =
         "ffb20595e36032a9476d1c6956e2dcdc814f85286fc4735751e5ec6f499ea9ed";
     const PUBLIC_DURABLE_OVERLAP_SHA256: &str =

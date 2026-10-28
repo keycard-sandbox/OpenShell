@@ -2514,11 +2514,9 @@ type SupervisorCredentialBroker struct {
 	// Patterns use network policy host syntax.
 	IncludeHosts []string `protobuf:"bytes,7,rep,name=include_hosts,json=includeHosts,proto3" json:"include_hosts,omitempty"`
 	// Host patterns removed from include_hosts. Exclusion wins.
-	ExcludeHosts []string `protobuf:"bytes,8,rep,name=exclude_hosts,json=excludeHosts,proto3" json:"exclude_hosts,omitempty"`
-	// Send the workload's Authorization header values to the broker.
-	ForwardAuthorization bool `protobuf:"varint,9,opt,name=forward_authorization,json=forwardAuthorization,proto3" json:"forward_authorization,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	ExcludeHosts  []string `protobuf:"bytes,8,rep,name=exclude_hosts,json=excludeHosts,proto3" json:"exclude_hosts,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SupervisorCredentialBroker) Reset() {
@@ -2605,13 +2603,6 @@ func (x *SupervisorCredentialBroker) GetExcludeHosts() []string {
 		return x.ExcludeHosts
 	}
 	return nil
-}
-
-func (x *SupervisorCredentialBroker) GetForwardAuthorization() bool {
-	if x != nil {
-		return x.ForwardAuthorization
-	}
-	return false
 }
 
 // Connection details for one operator-registered supervisor middleware service.
@@ -2946,7 +2937,7 @@ const file_sandbox_proto_rawDesc = "" +
 	"\x11credential_broker\x18\x12 \x01(\v20.openshell.sandbox.v1.SupervisorCredentialBrokerR\x10credentialBroker\x1ac\n" +
 	"\rSettingsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12<\n" +
-	"\x05value\x18\x02 \x01(\v2&.openshell.sandbox.v1.EffectiveSettingR\x05value:\x028\x01\"\x95\x03\n" +
+	"\x05value\x18\x02 \x01(\v2&.openshell.sandbox.v1.EffectiveSettingR\x05value:\x028\x01\"\xe0\x02\n" +
 	"\x1aSupervisorCredentialBroker\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12#\n" +
 	"\rgrpc_endpoint\x18\x02 \x01(\tR\fgrpcEndpoint\x12%\n" +
@@ -2955,8 +2946,7 @@ const file_sandbox_proto_rawDesc = "" +
 	"\x18allow_insecure_transport\x18\x05 \x01(\bR\x16allowInsecureTransport\x12B\n" +
 	"\x0frequest_timeout\x18\x06 \x01(\v2\x19.google.protobuf.DurationR\x0erequestTimeout\x12#\n" +
 	"\rinclude_hosts\x18\a \x03(\tR\fincludeHosts\x12#\n" +
-	"\rexclude_hosts\x18\b \x03(\tR\fexcludeHosts\x123\n" +
-	"\x15forward_authorization\x18\t \x01(\bR\x14forwardAuthorization\"\x81\x04\n" +
+	"\rexclude_hosts\x18\b \x03(\tR\fexcludeHosts\"\x81\x04\n" +
 	"\x1bSupervisorMiddlewareService\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12#\n" +
 	"\rgrpc_endpoint\x18\x02 \x01(\tR\fgrpcEndpoint\x12*\n" +

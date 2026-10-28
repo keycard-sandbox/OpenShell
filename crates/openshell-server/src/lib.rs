@@ -722,7 +722,6 @@ pub(crate) async fn run_server(
                 name = %broker.registration.name,
                 include_hosts = ?broker.registration.include_hosts,
                 exclude_hosts = ?broker.registration.exclude_hosts,
-                forward_authorization = broker.registration.forward_authorization,
                 "credential broker configured"
             );
             Some(broker)

@@ -704,9 +704,6 @@ pub struct CredentialBrokerFileConfig {
     /// Hosts removed from `include_hosts`.
     #[serde(default)]
     pub exclude_hosts: Vec<String>,
-    /// Send the workload's `Authorization` header values to the broker.
-    #[serde(default)]
-    pub forward_authorization: bool,
 }
 
 const MIDDLEWARE_KIND: &str = "supervisor middleware";
@@ -761,7 +758,6 @@ impl TryFrom<&CredentialBrokerFileConfig> for SupervisorCredentialBroker {
             request_timeout,
             include_hosts: config.include_hosts.clone(),
             exclude_hosts: config.exclude_hosts.clone(),
-            forward_authorization: config.forward_authorization,
         };
         openshell_core::credential_broker::validate(&registration).map_err(|message| {
             ConfigFileError::InvalidValue {
@@ -1944,7 +1940,6 @@ grpc_endpoint = "https://broker.example:8443"
 timeout = "2s"
 include_hosts = ["**"]
 exclude_hosts = ["status.example.com"]
-forward_authorization = true
 "#,
         );
         let file = load(tmp.path()).expect("valid broker registration parses");
@@ -1969,7 +1964,6 @@ forward_authorization = true
                 }),
                 include_hosts: vec!["**".into()],
                 exclude_hosts: vec!["status.example.com".into()],
-                forward_authorization: true,
             }
         );
     }
@@ -1985,7 +1979,6 @@ forward_authorization = true
             timeout: None,
             include_hosts: vec!["**".into()],
             exclude_hosts: vec![],
-            forward_authorization: false,
         };
         let cases: [(&str, CredentialBrokerFileConfig, &str); 4] = [
             (

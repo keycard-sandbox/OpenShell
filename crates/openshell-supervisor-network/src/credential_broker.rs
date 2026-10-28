@@ -75,8 +75,7 @@ pub struct BrokerRequest<'a> {
     pub host: &'a str,
     pub port: u16,
     pub path: &'a str,
-    /// Raw request header block, used for `Authorization` and
-    /// `Connection`-nominated headers.
+    /// Raw request header block, used for `Connection`-nominated headers.
     pub raw_header: &'a [u8],
 }
 
@@ -126,7 +125,6 @@ impl BrokerEndpoint for GrpcBrokerEndpoint {
 pub struct CredentialBroker {
     selector: HostSelector,
     timeout: Duration,
-    forward_authorization: bool,
     sandbox_id: String,
     endpoint: Arc<dyn BrokerEndpoint>,
 }
@@ -154,7 +152,6 @@ impl CredentialBroker {
         Ok(Self::new(
             validated.selector,
             validated.timeout,
-            registration.forward_authorization,
             sandbox_id,
             Arc::new(endpoint),
         ))
@@ -165,14 +162,12 @@ impl CredentialBroker {
     pub fn new(
         selector: HostSelector,
         timeout: Duration,
-        forward_authorization: bool,
         sandbox_id: &str,
         endpoint: Arc<dyn BrokerEndpoint>,
     ) -> Self {
         Self {
             selector,
             timeout,
-            forward_authorization,
             sandbox_id: sandbox_id.to_string(),
             endpoint,
         }
@@ -194,11 +189,6 @@ impl CredentialBroker {
         request: BrokerRequest<'_>,
     ) -> Result<BrokerDecision, TokenGrantFailure> {
         let failure = |kind| TokenGrantFailure::new(kind, TokenGrantStage::CredentialBroker);
-        let authorization = if self.forward_authorization {
-            header_values(request.raw_header, "authorization")
-        } else {
-            Vec::new()
-        };
         let result = self
             .endpoint
             .grant_http_request(
@@ -210,7 +200,6 @@ impl CredentialBroker {
                     host: normalized_host(request.host).to_ascii_lowercase(),
                     port: u32::from(request.port),
                     path: request.path.to_string(),
-                    authorization,
                 },
                 self.timeout,
             )
@@ -552,7 +541,6 @@ mod tests {
 
     fn broker(
         answer: Result<HttpCredentialResult, Code>,
-        forward_authorization: bool,
     ) -> (CredentialBroker, Arc<ScriptedBroker>) {
         let endpoint = Arc::new(ScriptedBroker {
             answer,
@@ -563,7 +551,6 @@ mod tests {
             CredentialBroker::new(
                 selector,
                 Duration::from_secs(1),
-                forward_authorization,
                 "sandbox-1",
                 endpoint.clone(),
             ),
@@ -765,7 +752,7 @@ mod tests {
             ),
         ];
         for (name, answer, scheme, expected) in cases {
-            let (broker, _) = broker(answer, false);
+            let (broker, _) = broker(answer);
             assert_eq!(broker.decide(request(scheme)).await, expected, "{name}");
         }
     }
@@ -814,7 +801,7 @@ mod tests {
             ("duplicate query", vec![query("k", "a"), query("k", "b")]),
         ];
         for (name, placements) in cases {
-            let (broker, _) = broker(Ok(grant(placements)), false);
+            let (broker, _) = broker(Ok(grant(placements)));
             assert_eq!(
                 broker.decide(request("https")).await,
                 Err(TokenGrantFailure::new(
@@ -827,30 +814,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_broker_sees_the_target_and_only_opted_in_authorization() {
-        for forward in [false, true] {
-            let (broker, endpoint) = broker(Ok(deny(DenyReason::AccessDenied)), forward);
-            let _ = broker.decide(request("https")).await;
-            let sent = endpoint.requests.lock().unwrap().pop().unwrap();
-            assert_eq!(
-                sent,
-                HttpCredentialRequest {
-                    request_id: "req-1".into(),
-                    sandbox_id: "sandbox-1".into(),
-                    method: "GET".into(),
-                    scheme: "https".into(),
-                    host: "api.example.com".into(),
-                    port: 443,
-                    path: "/v1/items".into(),
-                    authorization: if forward {
-                        vec!["Bearer user-token".into()]
-                    } else {
-                        vec![]
-                    },
-                },
-                "forward_authorization={forward}"
-            );
-        }
+    async fn the_broker_sees_only_the_request_target() {
+        let (broker, endpoint) = broker(Ok(deny(DenyReason::AccessDenied)));
+        let _ = broker.decide(request("https")).await;
+        let sent = endpoint.requests.lock().unwrap().pop().unwrap();
+        assert_eq!(
+            sent,
+            HttpCredentialRequest {
+                request_id: "req-1".into(),
+                sandbox_id: "sandbox-1".into(),
+                method: "GET".into(),
+                scheme: "https".into(),
+                host: "api.example.com".into(),
+                port: 443,
+                path: "/v1/items".into(),
+            }
+        );
     }
 
     #[test]

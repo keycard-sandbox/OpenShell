@@ -508,8 +508,6 @@ message SupervisorCredentialBroker {
   repeated string include_hosts = 7;
   // Host patterns removed from include_hosts. Exclusion wins.
   repeated string exclude_hosts = 8;
-  // Send the workload's Authorization header values to the broker.
-  bool forward_authorization = 9;
 }
 
 // Connection details for one operator-registered supervisor middleware service.

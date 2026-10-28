@@ -790,7 +790,6 @@ audience = "urn:openshell:extension:credential-broker:corp-broker"
 timeout = "1s"
 include_hosts = ["**"]
 exclude_hosts = ["status.example.com"]
-forward_authorization = true
 ```
 
 | Field | Required | Behavior |
@@ -803,7 +802,6 @@ forward_authorization = true
 | `timeout` | No | Deadline for each supervisor call, from `10ms` to `30s`. Defaults to `1s`. |
 | `include_hosts` | Yes | Host patterns whose requests go to the broker, in network policy host syntax. |
 | `exclude_hosts` | No | Host patterns removed from `include_hosts`. Exclusion takes precedence. `include_hosts` and `exclude_hosts` together allow at most 32 patterns. |
-| `forward_authorization` | No | Send the workload's `Authorization` header values to the broker. Defaults to `false`. |
 
 `openshell-gateway config preflight` validates the section. At startup the gateway calls the broker's `Describe` RPC to resolve compatibility. It completes [extension protocol negotiation](/extensibility/overview#protocol-negotiation) and refuses to start when the broker is unavailable, incompatible, or advertises an `expected_audience` that differs from `audience`. An authenticated registration requires `[openshell.gateway.gateway_jwt]`.
 
