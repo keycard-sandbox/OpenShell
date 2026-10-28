@@ -771,7 +771,7 @@ Addresses use lowercase hosts, canonical paths, and sorted distinct effective po
 
 ### Read Token Grant Failures
 
-When OpenShell cannot obtain a required token, the workload receives HTTP 502 with an `x-openshell-request-id` header. The response hides the cause. If you can read the sandbox, inspect its latest failure:
+When OpenShell cannot obtain a required token, the workload receives HTTP 502 with an `x-openshell-request-id` header. When a [credential broker](/extensibility/credential-brokers) denies the request, the workload receives HTTP 403 with the same header. The response hides the cause. If you can read the sandbox, inspect its latest failure:
 
 ```shell
 openshell sandbox get my-sandbox --output json | jq '.last_token_grant_failure'

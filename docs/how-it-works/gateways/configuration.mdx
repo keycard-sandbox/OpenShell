@@ -336,6 +336,15 @@ audience = "urn:openshell:middleware:local-content-guard"
 max_payload_bytes = 262144
 timeout = "500ms"
 
+# Operator-run credential broker. Supervisors call it for every inspected HTTP
+# request to a selected host.
+[openshell.supervisor.credential_broker]
+name = "corp-broker"
+grpc_endpoint = "https://host.openshell.internal:50052"
+tls_ca_cert_path = "/etc/openshell/certs/credential-broker-ca.pem"
+include_hosts = ["**"]
+exclude_hosts = ["status.example.com"]
+
 # Gateway listener TLS (distinct from the supervisor gateway CA).
 # client_ca_path is optional; omit it for HTTPS-only listeners that do not
 # verify client certificates.
@@ -767,6 +776,36 @@ The service `grpc_endpoint` supports plaintext `http://` and TLS `https://`. HTT
 When `gateway_jwt` is configured, OpenShell attaches short-lived bearer credentials to gateway and supervisor calls and requires `https://`. A middleware endpoint must be reachable from sandbox supervisors, so Unix sockets are not an option here. Set `allow_insecure_transport = true` on a registration to keep a plaintext `http://` endpoint: OpenShell then attaches no credential, supervisors do not request one, and the gateway logs a warning naming the registration at every startup. mTLS client authentication, health checks, and runtime registration are not currently supported. The endpoint must be reachable from both the gateway and sandbox supervisors; use `host.openshell.internal` or another shared address that can be resolved in both places.
 
 See [Supervisor Middleware Configuration](/extensibility/supervisor-middleware/configure) for attachment, failure, and operational guidance.
+
+## Credential Broker
+
+Register one operator-run [credential broker](/extensibility/credential-brokers) with `[openshell.supervisor.credential_broker]`. Registration is static and operator-owned; changing it requires restarting the gateway. Sandbox policy does not select the broker. Every supervisor receives the registration.
+
+```toml
+[openshell.supervisor.credential_broker]
+name = "corp-broker"
+grpc_endpoint = "https://host.openshell.internal:50052"
+tls_ca_cert_path = "/etc/openshell/certs/credential-broker-ca.pem"
+audience = "urn:openshell:extension:credential-broker:corp-broker"
+timeout = "1s"
+include_hosts = ["**"]
+exclude_hosts = ["status.example.com"]
+forward_authorization = true
+```
+
+| Field | Required | Behavior |
+| --- | --- | --- |
+| `name` | Yes | Diagnostic name. |
+| `grpc_endpoint` | Yes | `https://` endpoint reachable from the gateway and every supervisor. A plaintext `http://` endpoint requires `allow_insecure_transport = true`. Unix sockets are not supported. |
+| `tls_ca_cert_path` | No | Certificate-only PEM bundle for a private CA. Requires an `https://` endpoint. |
+| `audience` | No | Exact audience of gateway-minted tokens. Defaults to `urn:openshell:extension:credential-broker:<name>`. |
+| `allow_insecure_transport` | No | Use a plaintext endpoint and attach no token. Defaults to `false`. |
+| `timeout` | No | Deadline for each supervisor call, from `10ms` to `30s`. Defaults to `1s`. |
+| `include_hosts` | Yes | Host patterns whose requests go to the broker, in network policy host syntax. |
+| `exclude_hosts` | No | Host patterns removed from `include_hosts`. Exclusion takes precedence. `include_hosts` and `exclude_hosts` together allow at most 32 patterns. |
+| `forward_authorization` | No | Send the workload's `Authorization` header values to the broker. Defaults to `false`. |
+
+`openshell-gateway config preflight` validates the section. At startup the gateway calls the broker's `Describe` RPC, completes [extension protocol negotiation](/extensibility/overview#protocol-negotiation), and refuses to start when the broker is unavailable, incompatible, or advertises an `expected_audience` that differs from `audience`. An authenticated registration requires `[openshell.gateway.gateway_jwt]`.
 
 ## Gateway Interceptors
 

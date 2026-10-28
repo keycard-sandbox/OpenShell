@@ -668,6 +668,7 @@ Each failure has a code, a stage identifying the failed step, and a recovery act
 |---|---|---|
 | `provider_authorization_required` | Provider authorization is required, including a missing or expired stored subject credential. | `reauthorize` |
 | `workload_identity_rejected` | The workload identity was rejected. | `fix_configuration` |
+| `access_denied` | A [credential broker](/extensibility/credential-brokers) denied the sandbox access to the resource. | `fix_configuration` |
 | `configuration_error` | Provider, grant, or token-service configuration is invalid. | `fix_configuration` |
 | `timeout` | A grant step timed out. | `retry` |
 | `unavailable` | A service or connection was unavailable. | `retry` |
