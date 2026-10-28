@@ -8,7 +8,7 @@ description: "Understand how OpenShell adapts to deployment-specific infrastruct
 keywords: "OpenShell Extensions, Middleware, Delegated Credential Grants, Interceptors, Drivers, Isolation Backends, Protocol Negotiation"
 ---
 
-![OpenShell extension points. Data plane: the sandboxed agent reaches the supervisor through the isolation backend, and supervisor middleware processes requests before they reach models and APIs. Control plane: you reach the gateway through interceptors, and gateway drivers connect it to runtimes and secret stores.](../images/openshell-extension-points.svg)
+![OpenShell extension points. Data plane: the sandboxed agent reaches the supervisor through the isolation backend, and supervisor middleware processes requests before they reach models and APIs. The supervisor gets per-request tokens from an authorization server. Control plane: you reach the gateway through interceptors, and gateway drivers connect it to runtimes and secret stores.](../images/openshell-extension-points.svg)
 
 Extensibility sits at the core of OpenShell. OpenShell is designed to run
 everywhere and adapt to the infrastructure, governance, and workload
@@ -37,8 +37,8 @@ without exposing managed secrets.
 
 A delegated credential grant sends credential decisions to your OAuth 2.0
 authorization server. For each inspected HTTPS request to a selected host, the
-supervisor requests a token with the sandbox's SPIFFE identity and sends the
-request with that token. It uses standard OAuth 2.0 token requests, not an
+supervisor requests a token with a JWT that identifies the sandbox and sends
+the request with that token. It uses standard OAuth 2.0 token requests, not an
 OpenShell gRPC contract.
 
 ### [Gateway Interceptors](/extensibility/gateway-interceptors)
