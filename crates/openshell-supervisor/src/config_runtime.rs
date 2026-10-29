@@ -244,6 +244,22 @@ impl ConfigRuntime {
         } else {
             std::collections::HashMap::new()
         };
+        // The broker's token goes in the shared store, where every broker call
+        // reads it. A missing token fails broker calls with 502 until a later
+        // poll installs it.
+        if result.extension_authentication_enabled
+            && let Some(broker) = result
+                .credential_broker
+                .as_ref()
+                .filter(|broker| !broker.allow_insecure_transport)
+            && let Err(error) = client
+                .extension_credentials_for(&[
+                    openshell_core::credential_broker::credential_service(broker),
+                ])
+                .await
+        {
+            warn!(error = %error, "Settings poll: credential broker token refresh failed");
+        }
 
         if reloads_gateway_policy && !result.configuration_admitted {
             let disposition = apply_policy_validation_failure(
@@ -341,6 +357,7 @@ impl ConfigRuntime {
                     },
                     registry_changed: middleware_registry_changed,
                     extension_credentials: &ctx.extension_credentials,
+                    credential_broker: result.credential_broker.as_ref(),
                     current_services: &mut self.middleware_services,
                     status: &mut self.middleware_registry_status,
                 },
@@ -554,6 +571,7 @@ impl ConfigRuntime {
                     retain_extension_credentials(
                         &ctx.extension_credentials,
                         &result.supervisor_middleware_services,
+                        result.credential_broker.as_ref(),
                         result.extension_authentication_enabled,
                     );
                     self.middleware_registry_status = MiddlewareRegistryStatus::Synchronized;
@@ -690,6 +708,9 @@ impl ConfigRuntime {
         // Apply OCSF JSON toggle from the `ocsf_json_enabled` setting.
         apply_ocsf_json_setting(&ctx.ocsf_enabled, &result.settings);
         apply_ocsf_schema_version_setting(&ctx.ocsf_schema_version, &result.settings);
+        if let Some(policy_local_ctx) = ctx.policy_local_ctx.as_ref() {
+            policy_local_ctx.install_credential_broker(result.credential_broker.as_ref());
+        }
 
         // Apply the agent-proposals feature toggle. On a false→true transition
         // we lazily install the skill so a sandbox that started with the flag
@@ -1278,6 +1299,10 @@ async fn run_policy_poll_loop_with_client<C: PolicyGatewayClient>(
                     }
                     apply_ocsf_json_setting(&ctx.ocsf_enabled, &result.settings);
                     apply_ocsf_schema_version_setting(&ctx.ocsf_schema_version, &result.settings);
+                    if let Some(policy_local_ctx) = ctx.policy_local_ctx.as_ref() {
+                        policy_local_ctx
+                            .install_credential_broker(result.credential_broker.as_ref());
+                    }
                     apply_agent_proposals_enabled(
                         &ctx.agent_proposals,
                         agent_proposals_enabled_from_settings(&result.settings),
@@ -1317,6 +1342,10 @@ async fn run_policy_poll_loop_with_client<C: PolicyGatewayClient>(
                 (InitialPollDisposition::TrackOnly, _) => {
                     apply_ocsf_json_setting(&ctx.ocsf_enabled, &result.settings);
                     apply_ocsf_schema_version_setting(&ctx.ocsf_schema_version, &result.settings);
+                    if let Some(policy_local_ctx) = ctx.policy_local_ctx.as_ref() {
+                        policy_local_ctx
+                            .install_credential_broker(result.credential_broker.as_ref());
+                    }
                     apply_agent_proposals_enabled(
                         &ctx.agent_proposals,
                         agent_proposals_enabled_from_settings(&result.settings),

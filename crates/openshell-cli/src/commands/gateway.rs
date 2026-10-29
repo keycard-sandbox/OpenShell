@@ -459,6 +459,7 @@ fn extension_kind_name(kind: i32) -> &'static str {
         ExtensionKind::CredentialDriver => "credential-driver",
         ExtensionKind::GatewayInterceptor => "gateway-interceptor",
         ExtensionKind::SupervisorMiddleware => "supervisor-middleware",
+        ExtensionKind::CredentialBroker => "credential-broker",
         ExtensionKind::Unspecified => "unspecified",
     }
 }

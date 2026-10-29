@@ -210,6 +210,12 @@ pub struct SandboxInstanceNetwork {
     pub denial_log: DenialLogSource,
     /// Proxy interception CA and trust-file directory.
     pub proxy_tls: ProxyTlsFiles,
+    /// Credential broker from the startup configuration. It is installed
+    /// before the proxy accepts a connection.
+    pub credential_broker: Option<openshell_core::proto::SupervisorCredentialBroker>,
+    /// Extension credentials that the policy poll loop rotates. Broker calls
+    /// read the broker's token from here.
+    pub extension_credentials: openshell_extension_core::ExtensionCredentialStore,
 }
 
 /// Provisioned proxy CA files and the directory that receives trust files.
@@ -308,7 +314,14 @@ pub async fn run_networking(
         provider_workload_api_socket,
         denial_log,
         proxy_tls,
+        credential_broker,
+        extension_credentials,
     } = instance;
+    let credential_broker_slot = Arc::new(crate::credential_broker::CredentialBrokerSlot::new(
+        sandbox_id.as_deref().unwrap_or_default(),
+        extension_credentials,
+    ));
+    credential_broker_slot.install(credential_broker.as_ref());
     let token_grants = SpiffeTokenGrantResolver::new(SandboxInstanceTokenGrants::new(
         gateway.clone(),
         sandbox_id.clone(),
@@ -323,7 +336,8 @@ pub async fn run_networking(
             workspace_rx,
         )
         .with_denial_log(denial_log)
-        .with_token_grants(Arc::new(token_grants)),
+        .with_token_grants(Arc::new(token_grants))
+        .with_credential_broker(credential_broker_slot.clone()),
     );
 
     // Readiness signal for the proxy accept loop: the proxy binds the TCP
@@ -650,6 +664,7 @@ pub async fn run_networking(
             activity_tx,
             upstream_proxy_args,
             transparent_engine_ready_rx,
+            credential_broker_slot,
         )?;
         (Some(dns), Some(transparent))
     } else {

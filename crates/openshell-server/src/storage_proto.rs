@@ -163,8 +163,11 @@ mod tests {
     // and SUSPENDED values to the shared
     // SandboxPhase enum. Stored rows never carried those values, so prior
     // payloads decode unchanged.
+    // Sandbox config field 18 adds SupervisorCredentialBroker to public reports,
+    // and ExtensionKind gains CREDENTIAL_BROKER. The gateway reads the broker
+    // from its config file and never stores it.
     const PUBLIC_RPC_SCHEMA_SHA256: &str =
-        "f24c9b77a85f59ae9ab60f783d45654d78bf566fcf260f9131f1aba39fa4b59b";
+        "ea47c3b8cb1ec571d5b79fd95ceca3a674b691348402a6995fbae79f04c195ce";
     const DURABLE_SCHEMA_SHA256: &str =
         "ffb20595e36032a9476d1c6956e2dcdc814f85286fc4735751e5ec6f499ea9ed";
     const PUBLIC_DURABLE_OVERLAP_SHA256: &str =
@@ -631,7 +634,7 @@ mod tests {
         }
         assert_eq!(
             compiled_method_count,
-            106 + PROVIDER_READINESS_RPC_SIGNATURES.len()
+            108 + PROVIDER_READINESS_RPC_SIGNATURES.len()
                 + PEER_OWNER_RPC_SIGNATURES.len()
                 + PEER_CONFIG_RPC_SIGNATURES.len()
                 + isolation_methods.len()
@@ -702,7 +705,7 @@ mod tests {
                 overlap_hash.as_str(),
             ),
             (
-                (330, 31),
+                (331, 31),
                 (95, 22),
                 (83, 22),
                 PUBLIC_RPC_SCHEMA_SHA256,

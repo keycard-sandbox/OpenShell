@@ -427,6 +427,7 @@ message SandboxConfigSnapshot {
   string configuration_instance_id = 15;
   string configuration_error = 16;
   uint64 settings_revision = 17;
+  SupervisorCredentialBroker credential_broker = 18;
 }
 
 // Response containing effective sandbox settings and policy, projected from
@@ -477,6 +478,36 @@ message GetSandboxConfigResponse {
   string configuration_instance_id = 15;
   // Monotonic revision of the sandbox-scoped settings row.
   uint64 settings_revision = 17;
+  // Operator-registered credential broker. Absent when the gateway does not
+  // configure one. Sandbox policy does not select it.
+  SupervisorCredentialBroker credential_broker = 18;
+}
+
+// Connection details for the operator-registered credential broker. The
+// supervisor calls it for every inspected HTTP request to a selected host,
+// refuses uninspected traffic to selected hosts, and refuses every request
+// when it rejects the registration.
+message SupervisorCredentialBroker {
+  // Operator-owned diagnostic name.
+  string name = 1;
+  // gRPC endpoint reachable from the sandbox supervisor.
+  string grpc_endpoint = 2;
+  // PEM-encoded trust roots loaded by the gateway from tls_ca_cert_path.
+  // Empty uses the platform trust store.
+  bytes tls_ca_cert_pem = 3;
+  // Exact `aud` of the extension tokens OpenShell sends to the broker. The
+  // gateway resolves an omitted operator value before sending sandbox config.
+  string audience = 4;
+  // Operator opt-out from extension authentication. When true the endpoint
+  // may be plaintext and OpenShell attaches no bearer credential.
+  bool allow_insecure_transport = 5;
+  // Per-call deadline, 10ms to 30s. Absence uses 1s.
+  google.protobuf.Duration request_timeout = 6;
+  // Host patterns whose requests go to the broker. At least one is required.
+  // Patterns use network policy host syntax.
+  repeated string include_hosts = 7;
+  // Host patterns removed from include_hosts. Exclusion wins.
+  repeated string exclude_hosts = 8;
 }
 
 // Connection details for one operator-registered supervisor middleware service.

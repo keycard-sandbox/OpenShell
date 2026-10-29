@@ -1211,6 +1211,10 @@ fn validate_preflight_semantics(
             ));
         }
     }
+    if let Some(broker) = &file.openshell.supervisor.credential_broker {
+        openshell_core::proto::SupervisorCredentialBroker::try_from(broker)
+            .map_err(|error| miette::miette!("{error}"))?;
+    }
     if args.name.trim().is_empty() {
         return Err(miette::miette!("gateway name must not be empty"));
     }
@@ -2903,6 +2907,10 @@ mod tests {
             (
                 "middleware",
                 "[openshell]\nversion = 2\n[[openshell.supervisor.middleware]]\nname = 'guard'\ngrpc_endpoint = 'http://127.0.0.1:50051'\nallow_insecure_transport = true\nmax_payload_bytes = 1024\ntimeout = 'invalid'\n",
+            ),
+            (
+                "credential-broker",
+                "[openshell]\nversion = 2\n[openshell.supervisor.credential_broker]\nname = 'corp-broker'\ngrpc_endpoint = 'http://127.0.0.1:50051'\ninclude_hosts = ['**']\n",
             ),
         ];
 

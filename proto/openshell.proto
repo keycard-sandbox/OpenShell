@@ -968,6 +968,7 @@ enum ExtensionKind {
   EXTENSION_KIND_CREDENTIAL_DRIVER = 2;
   EXTENSION_KIND_GATEWAY_INTERCEPTOR = 3;
   EXTENSION_KIND_SUPERVISOR_MIDDLEWARE = 4;
+  EXTENSION_KIND_CREDENTIAL_BROKER = 5;
 }
 
 // Public, non-secret snapshot of one successful startup negotiation.

@@ -3053,6 +3053,10 @@ pub async fn build_sandbox_config_snapshot_from_inputs(
     let settings = merge_effective_settings(global_settings, &sandbox_settings)?;
     let supervisor_middleware_services =
         state.middleware_registry.required_services(policy.as_ref());
+    let credential_broker = state
+        .credential_broker
+        .as_ref()
+        .map(|broker| broker.registration.clone());
     let config_revision = compute_config_revision_with_validation_mode(
         policy.as_ref(),
         &settings,
@@ -3060,6 +3064,7 @@ pub async fn build_sandbox_config_snapshot_from_inputs(
         &supervisor_middleware_services,
         state.config.policy_validation_failure_mode,
         state.extension_jwt_issuer.is_some(),
+        credential_broker.as_ref(),
     );
     if let Some(policy) = policy.as_ref() {
         validate_policy_credential_binding_context(
@@ -3103,6 +3108,7 @@ pub async fn build_sandbox_config_snapshot_from_inputs(
             .as_str()
             .to_string(),
         extension_authentication_enabled: state.extension_jwt_issuer.is_some(),
+        credential_broker,
         provider_attachment_epoch: sandbox
             .spec
             .as_ref()
@@ -3130,6 +3136,7 @@ fn sandbox_config_response(snapshot: SandboxConfigSnapshot) -> GetSandboxConfigR
         configuration_admitted: snapshot.configuration_admitted,
         configuration_error: snapshot.configuration_error,
         configuration_instance_id: snapshot.configuration_instance_id,
+        credential_broker: snapshot.credential_broker,
     }
 }
 
@@ -6897,6 +6904,7 @@ fn compute_config_revision_with_validation_mode(
     supervisor_middleware_services: &[openshell_core::proto::SupervisorMiddlewareService],
     policy_validation_failure_mode: openshell_core::PolicyValidationFailureMode,
     extension_authentication_enabled: bool,
+    credential_broker: Option<&openshell_core::proto::SupervisorCredentialBroker>,
 ) -> u64 {
     let mut hasher = Sha256::new();
     hasher.update((policy_source as i32).to_le_bytes());
@@ -6936,6 +6944,9 @@ fn compute_config_revision_with_validation_mode(
     for service in middleware {
         hasher.update(service.encode_to_vec());
     }
+    if let Some(broker) = credential_broker {
+        hasher.update(broker.encode_to_vec());
+    }
 
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];
@@ -6957,6 +6968,7 @@ fn compute_config_revision(
         supervisor_middleware_services,
         openshell_core::PolicyValidationFailureMode::default(),
         false,
+        None,
     )
 }
 
@@ -23114,6 +23126,7 @@ mod tests {
             &[],
             openshell_core::PolicyValidationFailureMode::FailClosed,
             false,
+            None,
         );
         let retain_last_valid = compute_config_revision_with_validation_mode(
             Some(&policy),
@@ -23122,6 +23135,7 @@ mod tests {
             &[],
             openshell_core::PolicyValidationFailureMode::RetainLastValid,
             false,
+            None,
         );
         assert_ne!(fail_closed, retain_last_valid);
     }
@@ -23138,6 +23152,7 @@ mod tests {
             &[],
             openshell_core::PolicyValidationFailureMode::FailClosed,
             false,
+            None,
         );
         let enabled = compute_config_revision_with_validation_mode(
             Some(&policy),
@@ -23146,8 +23161,44 @@ mod tests {
             &[],
             openshell_core::PolicyValidationFailureMode::FailClosed,
             true,
+            None,
         );
         assert_ne!(disabled, enabled);
+    }
+
+    #[test]
+    fn config_revision_changes_when_credential_broker_changes() {
+        let policy = ProtoSandboxPolicy::default();
+        let settings = HashMap::new();
+        let revision = |broker: Option<&openshell_core::proto::SupervisorCredentialBroker>| {
+            compute_config_revision_with_validation_mode(
+                Some(&policy),
+                &settings,
+                PolicySource::Sandbox,
+                &[],
+                openshell_core::PolicyValidationFailureMode::FailClosed,
+                false,
+                broker,
+            )
+        };
+        let broker = openshell_core::proto::SupervisorCredentialBroker {
+            name: "corp-broker".to_string(),
+            grpc_endpoint: "https://broker.example".to_string(),
+            include_hosts: vec!["api.example.com".to_string()],
+            ..Default::default()
+        };
+        let widened = openshell_core::proto::SupervisorCredentialBroker {
+            include_hosts: vec!["**".to_string()],
+            ..broker.clone()
+        };
+        let revisions = [
+            revision(None),
+            revision(Some(&broker)),
+            revision(Some(&widened)),
+        ];
+        assert_ne!(revisions[0], revisions[1]);
+        assert_ne!(revisions[1], revisions[2]);
+        assert_eq!(revisions[1], revision(Some(&broker)));
     }
 
     #[test]

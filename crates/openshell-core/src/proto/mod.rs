@@ -82,6 +82,10 @@ pub mod gateway_interceptor {
     pub use super::generated::openshell::gateway_interceptor::v1;
 }
 
+pub mod credential_broker {
+    pub use super::generated::openshell::credential_broker::v1;
+}
+
 /// Private gateway-to-shared-supervisor assignment protocol.
 pub mod supervisor_host {
     pub use super::generated::openshell::supervisor::host::v1;

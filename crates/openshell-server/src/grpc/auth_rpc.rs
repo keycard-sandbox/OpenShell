@@ -357,10 +357,18 @@ pub async fn handle_refresh_sandbox_token(
         config_request
             .extensions_mut()
             .insert(Principal::Sandbox(sandbox.clone()));
-        let available = super::policy::handle_get_sandbox_config(state, config_request)
+        let config = super::policy::handle_get_sandbox_config(state, config_request)
             .await?
-            .into_inner()
-            .supervisor_middleware_services;
+            .into_inner();
+        // The credential broker applies to every sandbox, so its credential
+        // is always available when the gateway configures one.
+        let mut available = config.supervisor_middleware_services;
+        available.extend(
+            config
+                .credential_broker
+                .as_ref()
+                .map(openshell_core::credential_broker::credential_service),
+        );
         mint_extension_credentials(
             issuer,
             &sandbox,

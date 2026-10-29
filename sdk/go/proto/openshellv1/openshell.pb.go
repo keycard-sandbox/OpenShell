@@ -38,6 +38,7 @@ const (
 	ExtensionKind_EXTENSION_KIND_CREDENTIAL_DRIVER     ExtensionKind = 2
 	ExtensionKind_EXTENSION_KIND_GATEWAY_INTERCEPTOR   ExtensionKind = 3
 	ExtensionKind_EXTENSION_KIND_SUPERVISOR_MIDDLEWARE ExtensionKind = 4
+	ExtensionKind_EXTENSION_KIND_CREDENTIAL_BROKER     ExtensionKind = 5
 )
 
 // Enum value maps for ExtensionKind.
@@ -48,6 +49,7 @@ var (
 		2: "EXTENSION_KIND_CREDENTIAL_DRIVER",
 		3: "EXTENSION_KIND_GATEWAY_INTERCEPTOR",
 		4: "EXTENSION_KIND_SUPERVISOR_MIDDLEWARE",
+		5: "EXTENSION_KIND_CREDENTIAL_BROKER",
 	}
 	ExtensionKind_value = map[string]int32{
 		"EXTENSION_KIND_UNSPECIFIED":           0,
@@ -55,6 +57,7 @@ var (
 		"EXTENSION_KIND_CREDENTIAL_DRIVER":     2,
 		"EXTENSION_KIND_GATEWAY_INTERCEPTOR":   3,
 		"EXTENSION_KIND_SUPERVISOR_MIDDLEWARE": 4,
+		"EXTENSION_KIND_CREDENTIAL_BROKER":     5,
 	}
 )
 
@@ -20991,13 +20994,14 @@ const file_openshell_proto_rawDesc = "" +
 	"\x14upstream_http_status\x18\a \x01(\rH\x00R\x12upstreamHttpStatus\x88\x01\x01\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\b \x01(\tR\trequestIdB\x17\n" +
-	"\x15_upstream_http_status*\xca\x01\n" +
+	"\x15_upstream_http_status*\xf0\x01\n" +
 	"\rExtensionKind\x12\x1e\n" +
 	"\x1aEXTENSION_KIND_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dEXTENSION_KIND_COMPUTE_DRIVER\x10\x01\x12$\n" +
 	" EXTENSION_KIND_CREDENTIAL_DRIVER\x10\x02\x12&\n" +
 	"\"EXTENSION_KIND_GATEWAY_INTERCEPTOR\x10\x03\x12(\n" +
-	"$EXTENSION_KIND_SUPERVISOR_MIDDLEWARE\x10\x04*\x81\x03\n" +
+	"$EXTENSION_KIND_SUPERVISOR_MIDDLEWARE\x10\x04\x12$\n" +
+	" EXTENSION_KIND_CREDENTIAL_BROKER\x10\x05*\x81\x03\n" +
 	"\fSandboxPhase\x12\x1d\n" +
 	"\x19SANDBOX_PHASE_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aSANDBOX_PHASE_PROVISIONING\x10\x01\x12\x17\n" +

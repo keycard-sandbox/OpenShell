@@ -1123,6 +1123,7 @@ impl TransparentTcpHandle {
         activity_tx: Option<ActivitySender>,
         upstream_proxy_args: &upstream_proxy::UpstreamProxyArgs,
         engine_ready: tokio::sync::watch::Receiver<bool>,
+        credential_broker: Arc<crate::credential_broker::CredentialBrokerSlot>,
     ) -> Result<Self> {
         let upstream_proxy = Arc::new(
             UpstreamProxyConfig::from_args(upstream_proxy_args)
@@ -1138,6 +1139,7 @@ impl TransparentTcpHandle {
             let denial_tx = denial_tx.clone();
             let activity_tx = activity_tx.clone();
             let upstream_proxy = upstream_proxy.clone();
+            let credential_broker = credential_broker.clone();
             let mut engine_ready = engine_ready.clone();
             joins.push(tokio::spawn(async move {
                 if tokio::time::timeout(
@@ -1164,6 +1166,7 @@ impl TransparentTcpHandle {
                     let denial_tx = denial_tx.clone();
                     let activity_tx = activity_tx.clone();
                     let upstream_proxy = upstream_proxy.clone();
+                    let credential_broker = credential_broker.clone();
                     tokio::spawn(async move {
                         if let Err(error) = handle_transparent_tcp_connection(
                             stream,
@@ -1175,6 +1178,7 @@ impl TransparentTcpHandle {
                             denial_tx,
                             activity_tx,
                             upstream_proxy,
+                            credential_broker,
                         )
                         .await
                         {
@@ -1212,6 +1216,7 @@ async fn handle_transparent_tcp_connection(
     denial_tx: Option<mpsc::UnboundedSender<DenialEvent>>,
     activity_tx: Option<ActivitySender>,
     upstream_proxy: Arc<Option<UpstreamProxyConfig>>,
+    credential_broker: Arc<crate::credential_broker::CredentialBrokerSlot>,
 ) -> Result<()> {
     let workload_addr = client.peer_addr().into_diagnostic()?;
     let original = original_destination(&client).into_diagnostic()?;
@@ -1353,6 +1358,15 @@ async fn handle_transparent_tcp_connection(
             endpoint_observation: None,
         },
     );
+    // The transparent path has no PolicyLocalContext, so the instance's broker
+    // slot is passed in directly.
+    if crate::credential_broker::refuses_raw_relay(
+        Some(&credential_broker),
+        &ctx.host,
+        "transparent tcp",
+    ) {
+        return Ok(());
+    }
     let middleware_gate = middleware_uninspectable_gate(&opa_engine, &ctx)?;
     if middleware_gate == crate::l7::middleware::UninspectableTrafficGate::Deny {
         crate::l7::middleware::emit_middleware_uninspectable(&ctx, "transparent tcp", true);
@@ -3148,6 +3162,14 @@ async fn handle_mediated_connection(
     );
 
     if effective_tls_skip {
+        if crate::credential_broker::refuses_raw_relay(
+            ctx.credential_broker.as_deref(),
+            &ctx.host,
+            "tls-skip tunnel",
+        ) {
+            respond(&mut client, &credential_broker_raw_relay_refusal()).await?;
+            return Ok(());
+        }
         // Policy validation rejects fail-closed middleware overlapping
         // `tls: skip` endpoints; this runtime gate is defense in depth.
         match middleware_uninspectable_gate(&opa_engine, &ctx)? {
@@ -3337,6 +3359,14 @@ async fn handle_mediated_connection(
             }
         }
     } else {
+        if crate::credential_broker::refuses_raw_relay(
+            ctx.credential_broker.as_deref(),
+            &ctx.host,
+            "non-http tcp",
+        ) {
+            respond(&mut client, &credential_broker_raw_relay_refusal()).await?;
+            return Ok(());
+        }
         let middleware_gate = middleware_uninspectable_gate(&opa_engine, &ctx)?;
         let requirement = inspection_requirement(should_inspect_l7, middleware_gate);
         if let Some(protocol_detail) =
@@ -5423,7 +5453,11 @@ async fn inject_token_grant_for_forward_request(
     // L4-only forwarding keeps selector-based credentials; it has no inspected
     // endpoint owner decision. Inspected requests always use preparation above.
     let Some(snapshot) = crate::l7::token_grant_injection::pin_live_credentials(l7_ctx) else {
-        return Ok(request.raw_header);
+        return Ok(
+            crate::l7::token_grant_injection::inject_brokered(request, l7_ctx, request_id)
+                .await?
+                .raw_header,
+        );
     };
     Ok(crate::l7::token_grant_injection::inject_for_selectors(
         request,
@@ -6544,7 +6578,7 @@ async fn handle_forward_proxy(
                     if let Some(observer) = endpoint_observer.as_ref() {
                         observer.observe_token_grant_refusal(refusal, &request_id);
                     }
-                    build_token_grant_failure_response(&request_id)
+                    build_token_grant_failure_response(refusal, &request_id)
                 },
             );
             respond(client, &response).await?;
@@ -7017,17 +7051,41 @@ fn build_json_error_response(status: u16, status_text: &str, error: &str, detail
     .into_bytes()
 }
 
+/// Refusal for a connection to a host the credential broker selects that the
+/// supervisor cannot parse as HTTP.
+fn credential_broker_raw_relay_refusal() -> Vec<u8> {
+    build_json_error_response(
+        403,
+        "Forbidden",
+        "credential_broker_required",
+        "traffic to this host must be HTTP that OpenShell can inspect",
+    )
+}
+
 /// Build the forward proxy's refusal for a failed dynamic token grant.
 ///
-/// This is the generic grant refusal plus a request ID header, which lets the
-/// caller quote the exchange to an operator without learning its cause.
-fn build_token_grant_failure_response(request_id: &str) -> Vec<u8> {
-    let generic = build_json_error_response(
-        502,
-        "Bad Gateway",
-        "token_grant_failed",
-        "dynamic token grant failed",
-    );
+/// A credential broker denial is a 403 and any other failure is the generic
+/// 502. Both add a request ID header, which lets the caller quote the exchange
+/// to an operator without learning its cause.
+fn build_token_grant_failure_response(
+    refusal: &crate::l7::token_grant_injection::TokenGrantInjectionError,
+    request_id: &str,
+) -> Vec<u8> {
+    let generic = if refusal.is_denial() {
+        build_json_error_response(
+            403,
+            "Forbidden",
+            "credential_broker_denied",
+            "the credential broker denied this request",
+        )
+    } else {
+        build_json_error_response(
+            502,
+            "Bad Gateway",
+            "token_grant_failed",
+            "dynamic token grant failed",
+        )
+    };
     String::from_utf8_lossy(&generic)
         .replacen(
             "\r\nConnection: close\r\n",
@@ -11687,11 +11745,41 @@ network_policies:
     const FORWARD_REQUEST_ID: &str = "9b8a7f6e-5d4c-4b3a-9f8e-7d6c5b4a3f2e";
 
     #[test]
-    fn forward_grant_refusal_adds_the_request_id_header() {
-        let response = build_token_grant_failure_response(FORWARD_REQUEST_ID);
+    fn forward_grant_refusal_status_follows_the_refusal_and_adds_the_request_id_header() {
+        use crate::l7::token_grant_injection::TokenGrantInjectionError;
+        use openshell_core::token_grant_failure::{
+            TokenGrantFailure, TokenGrantFailureKind, TokenGrantStage,
+        };
+        const BAD_GATEWAY: (&str, &str) = (
+            "HTTP/1.1 502 Bad Gateway\r\n",
+            r#"{"error":"token_grant_failed","detail":"dynamic token grant failed"}"#,
+        );
+        const FORBIDDEN: (&str, &str) = (
+            "HTTP/1.1 403 Forbidden\r\n",
+            r#"{"error":"credential_broker_denied","detail":"the credential broker denied this request"}"#,
+        );
+        let failure = |kind| TokenGrantFailure::new(kind, TokenGrantStage::CredentialBroker);
+        let cases = [
+            (TokenGrantFailureKind::Unavailable, false, BAD_GATEWAY),
+            (TokenGrantFailureKind::AccessDenied, false, BAD_GATEWAY),
+            (TokenGrantFailureKind::Unavailable, true, BAD_GATEWAY),
+            (TokenGrantFailureKind::AccessDenied, true, FORBIDDEN),
+            (
+                TokenGrantFailureKind::ProviderAuthorizationRequired,
+                true,
+                FORBIDDEN,
+            ),
+        ];
         let header =
             format!("\r\nx-openshell-request-id: {FORWARD_REQUEST_ID}\r\nConnection: close\r\n");
-        assert!(String::from_utf8_lossy(&response).contains(&header));
+        for (kind, brokered, (status_line, body)) in cases {
+            let refusal = TokenGrantInjectionError::for_test(failure(kind), brokered);
+            let response = build_token_grant_failure_response(&refusal, FORWARD_REQUEST_ID);
+            let response = String::from_utf8_lossy(&response);
+            assert!(response.starts_with(status_line), "{response}");
+            assert!(response.contains(&header), "{response}");
+            assert!(response.ends_with(body), "{response}");
+        }
     }
 
     type ForwardGrantResponse<'a> =
@@ -11739,6 +11827,7 @@ network_policies:
             secret_resolver: None,
             provider_credentials: Some(fixture.provider_credentials()),
             token_grant_resolver: Some(fixture.resolver()),
+            credential_broker: None,
             ..Default::default()
         };
 

@@ -27,7 +27,8 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use openshell_core::proto::{
-    SupervisorMiddlewareBinding, SupervisorMiddlewareBindingPolicy, SupervisorMiddlewareService,
+    SupervisorCredentialBroker, SupervisorMiddlewareBinding, SupervisorMiddlewareBindingPolicy,
+    SupervisorMiddlewareService,
 };
 use openshell_core::{
     ExtensionBindingPolicy, GatewayAuthConfig, GatewayInterceptorConfig, GatewayJwtConfig,
@@ -516,6 +517,10 @@ pub struct SupervisorFileSection {
     /// operator-owned and changes require a gateway restart.
     #[serde(default)]
     pub middleware: Vec<MiddlewareServiceFileConfig>,
+    /// Operator-run credential broker. Supervisors call it for every inspected
+    /// HTTP request to a selected host. Changes require a gateway restart.
+    #[serde(default)]
+    pub credential_broker: Option<CredentialBrokerFileConfig>,
     /// Shared network-supervisor configuration. This is intentionally outside
     /// the compute-driver tables so every supported driver consumes the same
     /// startup contract.
@@ -611,12 +616,13 @@ impl TryFrom<&MiddlewareServiceFileConfig> for SupervisorMiddlewareService {
         let tls_ca_cert_pem = match &config.tls_ca_cert_path {
             Some(path) => {
                 let pem =
-                    std::fs::read(path).map_err(|source| ConfigFileError::MiddlewareTlsCaRead {
+                    std::fs::read(path).map_err(|source| ConfigFileError::ExtensionTlsCaRead {
+                        kind: MIDDLEWARE_KIND,
                         name: config.name.clone(),
                         path: path.clone(),
                         source,
                     })?;
-                sanitize_ca_cert_pem(&config.name, path, &pem)?
+                sanitize_ca_cert_pem(MIDDLEWARE_KIND, &config.name, path, &pem)?
             }
             None => Vec::new(),
         };
@@ -670,17 +676,117 @@ impl TryFrom<&MiddlewareServiceFileConfig> for SupervisorMiddlewareService {
     }
 }
 
-fn sanitize_ca_cert_pem(name: &str, path: &Path, pem: &[u8]) -> Result<Vec<u8>, ConfigFileError> {
+/// One `[openshell.supervisor.credential_broker]` registration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialBrokerFileConfig {
+    /// Operator-facing name used for diagnostics.
+    pub name: String,
+    /// HTTPS gRPC endpoint reachable by the gateway and supervisors. Plaintext
+    /// `http://` requires `allow_insecure_transport`.
+    pub grpc_endpoint: String,
+    /// Optional PEM trust-root bundle for an HTTPS endpoint.
+    #[serde(default)]
+    pub tls_ca_cert_path: Option<PathBuf>,
+    /// Exact JWT audience. Defaults to
+    /// `urn:openshell:extension:credential-broker:<name>`.
+    #[serde(default)]
+    pub audience: Option<String>,
+    /// Opt out of extension authentication. Development and trusted-network
+    /// deployments only.
+    #[serde(default)]
+    pub allow_insecure_transport: bool,
+    /// Per-call deadline using an integer with an `ms` or `s` suffix.
+    #[serde(default)]
+    pub timeout: Option<String>,
+    /// Hosts whose requests go to the broker, in network policy host syntax.
+    pub include_hosts: Vec<String>,
+    /// Hosts removed from `include_hosts`.
+    #[serde(default)]
+    pub exclude_hosts: Vec<String>,
+}
+
+const MIDDLEWARE_KIND: &str = "supervisor middleware";
+const CREDENTIAL_BROKER_KIND: &str = "credential broker";
+
+impl TryFrom<&CredentialBrokerFileConfig> for SupervisorCredentialBroker {
+    type Error = ConfigFileError;
+
+    fn try_from(config: &CredentialBrokerFileConfig) -> Result<Self, Self::Error> {
+        const TIMEOUT_FIELD: &str = "openshell.supervisor.credential_broker.timeout";
+        let tls_ca_cert_pem = match &config.tls_ca_cert_path {
+            Some(path) => {
+                let pem =
+                    std::fs::read(path).map_err(|source| ConfigFileError::ExtensionTlsCaRead {
+                        kind: CREDENTIAL_BROKER_KIND,
+                        name: config.name.clone(),
+                        path: path.clone(),
+                        source,
+                    })?;
+                sanitize_ca_cert_pem(CREDENTIAL_BROKER_KIND, &config.name, path, &pem)?
+            }
+            None => Vec::new(),
+        };
+        let request_timeout = config
+            .timeout
+            .as_deref()
+            .map(openshell_core::middleware::parse_middleware_timeout)
+            .transpose()
+            .map_err(|_| ConfigFileError::InvalidValue {
+                field: TIMEOUT_FIELD,
+                message: "must be a duration between 10ms and 30s",
+            })?
+            .map(openshell_core::time::duration_from_std)
+            .transpose()
+            .map_err(|_| ConfigFileError::InvalidValue {
+                field: TIMEOUT_FIELD,
+                message: "duration is outside the protobuf range",
+            })?;
+        let registration = Self {
+            name: config.name.clone(),
+            grpc_endpoint: config.grpc_endpoint.clone(),
+            tls_ca_cert_pem,
+            audience: config
+                .audience
+                .as_deref()
+                .filter(|audience| !audience.is_empty())
+                .map_or_else(
+                    || format!("urn:openshell:extension:credential-broker:{}", config.name),
+                    ToString::to_string,
+                ),
+            allow_insecure_transport: config.allow_insecure_transport,
+            request_timeout,
+            include_hosts: config.include_hosts.clone(),
+            exclude_hosts: config.exclude_hosts.clone(),
+        };
+        openshell_core::credential_broker::validate(&registration).map_err(|message| {
+            ConfigFileError::InvalidValue {
+                field: "openshell.supervisor.credential_broker",
+                message,
+            }
+        })?;
+        Ok(registration)
+    }
+}
+
+fn sanitize_ca_cert_pem(
+    kind: &'static str,
+    name: &str,
+    path: &Path,
+    pem: &[u8],
+) -> Result<Vec<u8>, ConfigFileError> {
     let mut sanitized = Vec::new();
     let mut certificate_count = 0;
     for item in <(SectionKind, Vec<u8>)>::pem_slice_iter(pem) {
-        let item = item.map_err(|source| ConfigFileError::MiddlewareTlsCaInvalid {
+        let item = item.map_err(|source| ConfigFileError::ExtensionTlsCaInvalid {
+            kind,
             name: name.to_string(),
             path: path.to_path_buf(),
             message: source.to_string(),
         })?;
         let (SectionKind::Certificate, certificate) = item else {
-            return Err(ConfigFileError::MiddlewareTlsCaInvalid {
+            return Err(ConfigFileError::ExtensionTlsCaInvalid {
+                kind,
                 name: name.to_string(),
                 path: path.to_path_buf(),
                 message: "PEM bundle contains a non-certificate block".to_string(),
@@ -696,7 +802,8 @@ fn sanitize_ca_cert_pem(name: &str, path: &Path, pem: &[u8]) -> Result<Vec<u8>, 
         sanitized.extend_from_slice(b"-----END CERTIFICATE-----\n");
     }
     if certificate_count == 0 {
-        return Err(ConfigFileError::MiddlewareTlsCaInvalid {
+        return Err(ConfigFileError::ExtensionTlsCaInvalid {
+            kind,
             name: name.to_string(),
             path: path.to_path_buf(),
             message: "PEM bundle does not contain a certificate".to_string(),
@@ -747,20 +854,22 @@ pub enum ConfigFileError {
     #[error("invalid gateway config field `openshell.drivers.{name}.isolation_backend`: {message}")]
     InvalidIsolationBackend { name: String, message: &'static str },
     #[error(
-        "failed to read TLS CA certificate for supervisor middleware '{name}' from '{}': {source}",
+        "failed to read TLS CA certificate for {kind} '{name}' from '{}': {source}",
         path.display()
     )]
-    MiddlewareTlsCaRead {
+    ExtensionTlsCaRead {
+        kind: &'static str,
         name: String,
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
     #[error(
-        "invalid TLS CA certificate for supervisor middleware '{name}' at '{}': {message}",
+        "invalid TLS CA certificate for {kind} '{name}' at '{}': {message}",
         path.display()
     )]
-    MiddlewareTlsCaInvalid {
+    ExtensionTlsCaInvalid {
+        kind: &'static str,
         name: String,
         path: PathBuf,
         message: String,
@@ -1006,8 +1115,8 @@ fn preflight_error(
         | ConfigFileError::InvalidValue { .. }
         | ConfigFileError::InvalidDriverTable { .. }
         | ConfigFileError::InvalidIsolationBackend { .. }
-        | ConfigFileError::MiddlewareTlsCaRead { .. }
-        | ConfigFileError::MiddlewareTlsCaInvalid { .. } => "malformed",
+        | ConfigFileError::ExtensionTlsCaRead { .. }
+        | ConfigFileError::ExtensionTlsCaInvalid { .. } => "malformed",
     };
     ConfigPreflightError {
         path: path.to_path_buf(),
@@ -1822,6 +1931,120 @@ bindings = ["http_response_pre_return", "http_request_pre_credentials"]
     }
 
     #[test]
+    fn credential_broker_registration_reaches_wire_configuration() {
+        let tmp = write_tmp(
+            r#"
+[openshell.supervisor.credential_broker]
+name = "corp-broker"
+grpc_endpoint = "https://broker.example:8443"
+timeout = "2s"
+include_hosts = ["**"]
+exclude_hosts = ["status.example.com"]
+"#,
+        );
+        let file = load(tmp.path()).expect("valid broker registration parses");
+        let config = file
+            .openshell
+            .supervisor
+            .credential_broker
+            .as_ref()
+            .expect("broker section");
+        let registration = SupervisorCredentialBroker::try_from(config).expect("valid broker");
+        assert_eq!(
+            registration,
+            SupervisorCredentialBroker {
+                name: "corp-broker".into(),
+                grpc_endpoint: "https://broker.example:8443".into(),
+                tls_ca_cert_pem: Vec::new(),
+                audience: "urn:openshell:extension:credential-broker:corp-broker".into(),
+                allow_insecure_transport: false,
+                request_timeout: Some(prost_types::Duration {
+                    seconds: 2,
+                    nanos: 0
+                }),
+                include_hosts: vec!["**".into()],
+                exclude_hosts: vec!["status.example.com".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn credential_broker_registration_rejects_invalid_values() {
+        let base = CredentialBrokerFileConfig {
+            name: "corp-broker".into(),
+            grpc_endpoint: "https://broker.example:8443".into(),
+            tls_ca_cert_path: None,
+            audience: None,
+            allow_insecure_transport: false,
+            timeout: None,
+            include_hosts: vec!["**".into()],
+            exclude_hosts: vec![],
+        };
+        let cases: [(&str, CredentialBrokerFileConfig, &str); 4] = [
+            (
+                "plaintext without the opt-out",
+                CredentialBrokerFileConfig {
+                    grpc_endpoint: "http://broker.example".into(),
+                    ..base.clone()
+                },
+                "grpc_endpoint must use https://; set allow_insecure_transport = true to use http://",
+            ),
+            (
+                "no include hosts",
+                CredentialBrokerFileConfig {
+                    include_hosts: vec![],
+                    ..base.clone()
+                },
+                "include_hosts or exclude_hosts is not a valid host selector",
+            ),
+            (
+                "timeout out of range",
+                CredentialBrokerFileConfig {
+                    timeout: Some("31s".into()),
+                    ..base.clone()
+                },
+                "must be a duration between 10ms and 30s",
+            ),
+            (
+                "unparseable timeout",
+                CredentialBrokerFileConfig {
+                    timeout: Some("soon".into()),
+                    ..base.clone()
+                },
+                "must be a duration between 10ms and 30s",
+            ),
+        ];
+        for (name, config, expected) in cases {
+            let error = SupervisorCredentialBroker::try_from(&config).expect_err(name);
+            assert!(
+                matches!(error, ConfigFileError::InvalidValue { message, .. } if message == expected),
+                "{name}: {error}"
+            );
+        }
+
+        let mut ca = tempfile::Builder::new()
+            .suffix(".pem")
+            .tempfile()
+            .expect("CA tempfile");
+        ca.write_all(b"not a certificate").expect("write CA");
+        let error = SupervisorCredentialBroker::try_from(&CredentialBrokerFileConfig {
+            tls_ca_cert_path: Some(ca.path().to_path_buf()),
+            ..base
+        })
+        .expect_err("invalid CA");
+        assert!(
+            matches!(
+                &error,
+                ConfigFileError::ExtensionTlsCaInvalid {
+                    kind: "credential broker",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn middleware_registration_rejects_invalid_ca_pem() {
         let mut ca = tempfile::Builder::new()
             .suffix(".pem")
@@ -1844,7 +2067,7 @@ bindings = ["http_response_pre_return", "http_request_pre_credentials"]
             .expect_err("invalid CA must fail before service connection");
         assert!(matches!(
             error,
-            ConfigFileError::MiddlewareTlsCaInvalid { .. }
+            ConfigFileError::ExtensionTlsCaInvalid { .. }
         ));
     }
 
@@ -1879,7 +2102,7 @@ bindings = ["http_response_pre_return", "http_request_pre_credentials"]
             .expect_err("private key material must never be distributed to a sandbox");
         assert!(matches!(
             error,
-            ConfigFileError::MiddlewareTlsCaInvalid { .. }
+            ConfigFileError::ExtensionTlsCaInvalid { .. }
         ));
         assert!(error.to_string().contains("non-certificate block"));
     }

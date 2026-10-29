@@ -46,6 +46,7 @@ fn fixture(
         port: 443,
         provider_credentials: Some(fixture.provider_credentials()),
         token_grant_resolver: Some(fixture.resolver()),
+        credential_broker: None,
         ..Default::default()
     };
     (fixture, ctx)

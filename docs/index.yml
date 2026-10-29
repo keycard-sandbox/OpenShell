@@ -90,6 +90,8 @@ navigation:
       path: extensibility/supervisor-middleware/configure.mdx
     - page: "Supported Operations"
       path: extensibility/supervisor-middleware/operations.mdx
+  - page: "Credential Brokers"
+    path: extensibility/credential-brokers.mdx
   - page: "Gateway Interceptors"
     path: extensibility/gateway-interceptors.mdx
   - page: "Drivers"

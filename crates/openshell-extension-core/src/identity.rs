@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 pub enum ExtensionKind {
     Middleware,
     Interceptor,
+    CredentialBroker,
 }
 
 impl ExtensionKind {
@@ -20,6 +21,7 @@ impl ExtensionKind {
         match self {
             Self::Middleware => "middleware",
             Self::Interceptor => "interceptor",
+            Self::CredentialBroker => "credential-broker",
         }
     }
 }

@@ -18,8 +18,9 @@ behavior while preserving the same API, policy model, and security boundaries.
 You can extend each layer of OpenShell:
 
 - **Control plane:** Gateway interceptors govern API operations.
-- **Data plane:** Middleware processes agent traffic, and isolation backends
-  control the sandboxed workload.
+- **Data plane:** Middleware processes agent traffic, credential brokers decide
+  the credential for each request, and isolation backends control the
+  sandboxed workload.
 - **Infrastructure:** Drivers connect OpenShell to compute runtimes and secret
   stores.
 
@@ -31,6 +32,13 @@ Supervisor middleware inspects, transforms, or denies allowed HTTP and
 WebSocket traffic. It runs after policy evaluation and before OpenShell injects
 provider credentials, so deployments can add content controls and auditing
 without exposing managed secrets.
+
+### [Credential Brokers](/extensibility/credential-brokers)
+
+A credential broker decides the credential for each inspected HTTP request to
+the hosts the operator selects. It can place a credential, send the request on
+without one, or deny it. It runs at the credential injection step, after
+middleware.
 
 ### [Gateway Interceptors](/extensibility/gateway-interceptors)
 
@@ -73,6 +81,7 @@ it:
 | --- | --- | --- |
 | Gateway interceptor | The gateway calls the interceptor service. | TCP with `http://` or `https://`, or a local Unix domain socket with `unix://`. |
 | Supervisor middleware | The gateway discovers the service, and sandbox supervisors evaluate traffic through it. | TCP with `http://` or `https://`. The endpoint must be reachable from both the gateway and supervisors, so Unix sockets are not supported. |
+| Credential broker | The gateway discovers the service, and sandbox supervisors call it for each selected request. | TCP with `http://` or `https://`. The endpoint must be reachable from both the gateway and supervisors, so Unix sockets are not supported. |
 | Compute or credential driver | The gateway calls an external driver service. | A local Unix domain socket. |
 | OpenShell isolation backend | The supervisor connects to the sandbox boundary through the OpenShell Sandbox Protocol. | A private Unix socket, TLS over TCP, or virtio-vsock selected and provisioned by the compute driver. |
 
@@ -92,7 +101,7 @@ and [VM compute driver](https://github.com/NVIDIA/OpenShell/tree/main/crates/ope
 ### Protocol Negotiation
 
 Before OpenShell uses a compute driver, credential driver, gateway interceptor,
-or supervisor middleware service, both peers exchange
+supervisor middleware service, or credential broker, both peers exchange
 `openshell.extension.v1.PeerMetadata`. The metadata identifies the protocol and
 implementation versions, supported capabilities, and capabilities required
 from the other peer. Family-specific features remain in their typed protocols.
@@ -111,6 +120,7 @@ Every extension returns protocol `1.0` and lists its family's base capability in
 | Credential driver | `openshell.credentials.contract` | `GetCredentialDriverCapabilitiesResponse.extension` |
 | Gateway interceptor | `openshell.gateway-interceptor.contract` | `InterceptorManifest.extension` |
 | Supervisor middleware | `openshell.supervisor-middleware.contract` | `MiddlewareManifest.extension` |
+| Credential broker | `openshell.credential-broker.contract` | `BrokerManifest.extension` |
 
 For example, a supervisor middleware `Describe` response includes:
 
@@ -131,13 +141,13 @@ gateway.
 
 ## Authenticating Extensions
 
-When the gateway has JWT signing configured, OpenShell sends a short-lived bearer token with every call to a [gateway interceptor](/extensibility/gateway-interceptors) or [supervisor middleware](/extensibility/supervisor-middleware) service. Validate it to confirm the call comes from your gateway or one of its sandboxes.
+When the gateway has JWT signing configured, OpenShell sends a short-lived bearer token with every call to a [gateway interceptor](/extensibility/gateway-interceptors), [supervisor middleware](/extensibility/supervisor-middleware) service, or [credential broker](/extensibility/credential-brokers). Validate it to confirm the call comes from your gateway or one of its sandboxes.
 
 | Claim | Value |
 |---|---|
 | `iss` | `openshell-gateway:<gateway_id>` |
-| `aud` | The registration's `audience`. Defaults to `urn:openshell:extension:interceptor:<name>` or `urn:openshell:extension:middleware:<name>`. |
-| `caller_kind` | `gateway`, or `supervisor` for middleware calls from a sandbox. |
+| `aud` | The registration's `audience`. Defaults to `urn:openshell:extension:interceptor:<name>`, `urn:openshell:extension:middleware:<name>`, or `urn:openshell:extension:credential-broker:<name>`. |
+| `caller_kind` | `gateway`, or `supervisor` for middleware and credential broker calls from a sandbox. |
 | `sandbox_id` | The calling sandbox, when `caller_kind` is `supervisor`. |
 
 ### Validate Each Token
