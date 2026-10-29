@@ -5,10 +5,10 @@ title: "Extensibility"
 sidebar-title: "Overview"
 slug: "extensibility/overview"
 description: "Understand how OpenShell adapts to deployment-specific infrastructure, governance, and workload requirements."
-keywords: "OpenShell Extensions, Middleware, Interceptors, Drivers, Isolation Backends, Protocol Negotiation"
+keywords: "OpenShell Extensions, Middleware, Delegated Credential Grants, Interceptors, Drivers, Isolation Backends, Protocol Negotiation"
 ---
 
-![OpenShell extension points. Data plane: the sandboxed agent reaches the supervisor through the isolation backend, and supervisor middleware processes requests before they reach models and APIs. Control plane: you reach the gateway through interceptors, and gateway drivers connect it to runtimes and secret stores.](../images/openshell-extension-points.svg)
+![OpenShell extension points. Data plane: the sandboxed agent reaches the supervisor through the isolation backend, and supervisor middleware processes requests before they reach models and APIs. The supervisor gets per-request tokens from an authorization server. Control plane: you reach the gateway through interceptors, and gateway drivers connect it to runtimes and secret stores.](../images/openshell-extension-points.svg)
 
 Extensibility sits at the core of OpenShell. OpenShell is designed to run
 everywhere and adapt to the infrastructure, governance, and workload
@@ -18,8 +18,9 @@ behavior while preserving the same API, policy model, and security boundaries.
 You can extend each layer of OpenShell:
 
 - **Control plane:** Gateway interceptors govern API operations.
-- **Data plane:** Middleware processes agent traffic, and isolation backends
-  control the sandboxed workload.
+- **Data plane:** Middleware processes agent traffic, delegated credential
+  grants get request credentials from your authorization server, and isolation
+  backends control the sandboxed workload.
 - **Infrastructure:** Drivers connect OpenShell to compute runtimes and secret
   stores.
 
@@ -31,6 +32,14 @@ Supervisor middleware inspects, transforms, or denies allowed HTTP and
 WebSocket traffic. It runs after policy evaluation and before OpenShell injects
 provider credentials, so deployments can add content controls and auditing
 without exposing managed secrets.
+
+### [Delegated Credential Grants](/extensibility/delegated-credential-grants)
+
+A delegated credential grant sends credential decisions to your OAuth 2.0
+authorization server. For each inspected HTTPS request to a selected host, the
+supervisor requests a token with a JWT that identifies the sandbox and sends
+the request with that token. It uses standard OAuth 2.0 token requests, not an
+OpenShell gRPC contract.
 
 ### [Gateway Interceptors](/extensibility/gateway-interceptors)
 
@@ -54,8 +63,9 @@ and runtime-specific isolation inside the provisioned workload.
 
 Start with the narrowest extension point that owns the behavior you need. Keep
 control-plane governance in an interceptor, infrastructure integration in a
-driver, application traffic processing in middleware, and workload control in
-an isolation backend. Each extension uses a typed contract so OpenShell keeps
+driver, application traffic processing in middleware, per-request credential
+decisions in a delegated credential grant, and workload control in an isolation
+backend. Each extension uses a typed contract so OpenShell keeps
 ownership of authentication, policy enforcement, secrets, and public API
 behavior.
 
