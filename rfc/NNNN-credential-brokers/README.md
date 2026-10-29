@@ -398,9 +398,6 @@ supervisor middleware and gateway interceptors use.
   resolver", which collides with `CredentialDriver.ResolveCredentials`, "token
   grant service", which suggests tokens only, and "credential middleware",
   which suggests the RFC 0009 chain.
-- Should the extension token or request include the sandbox's workspace,
-  owner, or the policy that admitted the request? The credential source may
-  need them for per-user decisions.
 - Should a grant include a TTL so the supervisor can reuse it for the same
   sandbox and origin? A TTL removes the call from most requests and makes
   revocation slower.
