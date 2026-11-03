@@ -342,10 +342,43 @@ async fn fetch_jwt_svid_from_socket(
 
     // Fetch JWT-SVID with token service audience
     // None = use the sandbox's default SPIFFE ID
-    client
-        .fetch_jwt_token([audience], None)
-        .await
-        .map_err(workload_api_failure)
+    wait_for_issued_identity(
+        || client.fetch_jwt_token([audience], None),
+        IDENTITY_ISSUE_WAIT,
+        IDENTITY_ISSUE_POLL,
+    )
+    .await
+    .map_err(workload_api_failure)
+}
+
+/// How long a fetch waits for SPIRE to issue the workload's first SVID.
+const IDENTITY_ISSUE_WAIT: Duration = Duration::from_secs(10);
+const IDENTITY_ISSUE_POLL: Duration = Duration::from_millis(500);
+
+/// Run `fetch` again while the Workload API answers that no identity is
+/// issued, polling every `poll` for at most `wait`. SPIRE registers a pod when
+/// it starts and issues its SVID a few seconds later. Every other answer
+/// returns at once.
+async fn wait_for_issued_identity<F, Fut>(
+    mut fetch: F,
+    wait: Duration,
+    poll: Duration,
+) -> Result<String, WorkloadApiError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<String, WorkloadApiError>>,
+{
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        match fetch().await {
+            Err(WorkloadApiError::NoIdentityIssued)
+                if tokio::time::Instant::now() + poll <= deadline =>
+            {
+                tokio::time::sleep(poll).await;
+            }
+            result => return result,
+        }
+    }
 }
 
 fn workload_api_failure(error: WorkloadApiError) -> TokenGrantFailure {
@@ -665,6 +698,69 @@ mod tests {
 
     fn test_http_client() -> TokenGrantClient {
         TokenGrantClient::new().expect("token grant HTTP client")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn waits_only_for_an_identity_that_is_not_issued_yet() {
+        use std::cell::Cell;
+        // Each fetch answers NoIdentityIssued for its first `pending` calls,
+        // then `answer`. The fetch count pins 500 ms polls within 10 s: one
+        // try plus 20 polls.
+        struct Case {
+            name: &'static str,
+            pending: usize,
+            answer: fn() -> Result<String, WorkloadApiError>,
+            expected: Result<&'static str, &'static str>,
+            fetches: usize,
+        }
+        let cases = [
+            Case {
+                name: "issued after two polls",
+                pending: 2,
+                answer: || Ok("svid".to_string()),
+                expected: Ok("svid"),
+                fetches: 3,
+            },
+            Case {
+                name: "never issued",
+                pending: usize::MAX,
+                answer: || Ok("svid".to_string()),
+                expected: Err("no identity issued"),
+                fetches: 21,
+            },
+            Case {
+                name: "another error returns at once",
+                pending: 0,
+                answer: || Err(WorkloadApiError::EmptyResponse),
+                expected: Err("empty"),
+                fetches: 1,
+            },
+        ];
+        for case in cases {
+            let calls = Cell::new(0usize);
+            let result = wait_for_issued_identity(
+                || {
+                    let call = calls.get();
+                    calls.set(call + 1);
+                    let answer = if call < case.pending {
+                        Err(WorkloadApiError::NoIdentityIssued)
+                    } else {
+                        (case.answer)()
+                    };
+                    async move { answer }
+                },
+                Duration::from_secs(10),
+                Duration::from_millis(500),
+            )
+            .await;
+            let result = result.as_deref().map_err(|error| match error {
+                WorkloadApiError::NoIdentityIssued => "no identity issued",
+                WorkloadApiError::EmptyResponse => "empty",
+                _ => "other",
+            });
+            assert_eq!(result, case.expected, "{}", case.name);
+            assert_eq!(calls.get(), case.fetches, "{}", case.name);
+        }
     }
 
     #[derive(Debug)]
